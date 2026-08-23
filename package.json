@@ -1,6 +1,6 @@
 {
   "name": "clawd-on-desk",
-  "version": "0.16.0",
+  "version": "99.0.1",
   "description": "A desktop pet that reacts to your Claude Code sessions in real-time.",
   "main": "src/main.js",
   "scripts": {
@@ -186,9 +186,8 @@
     ],
     "publish": [
       {
-        "provider": "github",
-        "owner": "rullerzhou-afk",
-        "repo": "clawd-on-desk"
+        "provider": "generic",
+        "url": "http://127.0.0.1:43819/"
       }
     ]
   },

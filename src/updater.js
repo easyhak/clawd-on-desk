@@ -6,6 +6,8 @@ const electron = require("electron");
 const { redactSecrets } = require("./secret-redact");
 
 const RELEASES_LATEST_URL = "https://github.com/rullerzhou-afk/clawd-on-desk/releases/latest";
+// Temporary, never-merge smoke overlay: keep A/B validation off the public feed.
+const SMOKE_LOOPBACK_TARGET_VERSION = "99.0.2";
 const DEPENDENCY_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 const UPDATE_ERROR_DETAIL_MAX_LENGTH = 8 * 1024;
 
@@ -1444,23 +1446,31 @@ function initUpdater(ctx, deps = {}) {
 
     let latestRelease;
     let latestVersion;
-    try {
-      latestRelease = await fetchLatestRelease();
-      latestVersion = latestRelease.tag_name;
-    } catch (err) {
-      clearActiveCheck();
-      rebuildMenus();
-      clearOverlay();
-      const report = buildUpdateErrorReport(err, {
-        phase: "release-lookup",
-        mode: "packaged",
-      });
-      if (manual) {
-        void showErrorBubble(report);
-      } else {
-        publishUpdateCheckSnapshot("error", { error: report });
+    const smokeLoopbackTargetVersion = app.isPackaged && !deps.app
+      ? SMOKE_LOOPBACK_TARGET_VERSION
+      : "";
+    if (smokeLoopbackTargetVersion) {
+      latestVersion = smokeLoopbackTargetVersion;
+      latestRelease = { tag_name: latestVersion, assets: [] };
+    } else {
+      try {
+        latestRelease = await fetchLatestRelease();
+        latestVersion = latestRelease.tag_name;
+      } catch (err) {
+        clearActiveCheck();
+        rebuildMenus();
+        clearOverlay();
+        const report = buildUpdateErrorReport(err, {
+          phase: "release-lookup",
+          mode: "packaged",
+        });
+        if (manual) {
+          void showErrorBubble(report);
+        } else {
+          publishUpdateCheckSnapshot("error", { error: report });
+        }
+        return getUpdateCheckSnapshot();
       }
-      return getUpdateCheckSnapshot();
     }
 
     if (compareVersions(currentVersion, latestVersion) <= 0 &&
