@@ -18,9 +18,17 @@
   function createLanguagePicker(config = {}) {
     const options = normalizeOptions(config.options);
     const ariaLabel = config.ariaLabel == null ? "" : String(config.ariaLabel);
+    const positionStrategy = config.positionStrategy === "viewport-fixed"
+      ? "viewport-fixed"
+      : "anchored";
+    const placementPreference = config.placementPreference === "up"
+      || config.placementPreference === "down"
+      ? config.placementPreference
+      : "auto";
     const picker = document.createElement("div");
     const extraClassName = config.className == null ? "" : String(config.className).trim();
     picker.className = `language-picker${extraClassName ? ` ${extraClassName}` : ""}`;
+    picker.classList.toggle("viewport-fixed", positionStrategy === "viewport-fixed");
 
     const trigger = document.createElement("button");
     trigger.type = "button";
@@ -78,9 +86,12 @@
     let menuUnmountTimer = null;
     let menuUnmountTransitionHandler = null;
     let menuLifecycleSeq = 0;
+    let scrollBoundary = null;
 
     const MENU_GAP_PX = 6;
+    const VIEWPORT_EDGE_INSET_PX = 12;
     const DEFAULT_MENU_MAX_HEIGHT_PX = 240;
+    const PREFERRED_PLACEMENT_MIN_HEIGHT_PX = 120;
     const MENU_CLOSE_FALLBACK_MIN_MS = 180;
     const MENU_CLOSE_SAFETY_MS = 40;
 
@@ -158,17 +169,33 @@
 
       let top = 0;
       let bottom = viewportHeight;
+      const viewportWidth = finiteNumber(root && root.innerWidth)
+        || finiteNumber(document && document.documentElement && document.documentElement.clientWidth);
+      let left = 0;
+      let right = viewportWidth && viewportWidth > 0 ? viewportWidth : null;
       const boundary = findPlacementBoundary();
       if (boundary && typeof boundary.getBoundingClientRect === "function") {
         const rect = boundary.getBoundingClientRect();
         const boundaryTop = finiteNumber(rect && rect.top);
         const boundaryBottom = finiteNumber(rect && rect.bottom);
+        const boundaryLeft = finiteNumber(rect && rect.left);
+        const boundaryRight = finiteNumber(rect && rect.right);
         if (boundaryTop != null && boundaryBottom != null && boundaryBottom > boundaryTop) {
           top = Math.max(top, boundaryTop);
           bottom = Math.min(bottom, boundaryBottom);
         }
+        if (boundaryLeft != null && boundaryRight != null && boundaryRight > boundaryLeft) {
+          left = Math.max(left, boundaryLeft);
+          right = right == null ? boundaryRight : Math.min(right, boundaryRight);
+        }
       }
-      return bottom > top ? { top, bottom } : null;
+      if (positionStrategy === "viewport-fixed") {
+        top += VIEWPORT_EDGE_INSET_PX;
+        bottom -= VIEWPORT_EDGE_INSET_PX;
+        left += VIEWPORT_EDGE_INSET_PX;
+        if (right != null) right -= VIEWPORT_EDGE_INSET_PX;
+      }
+      return bottom > top ? { top, bottom, left, right } : null;
     }
 
     function ensureVisible() {
@@ -196,13 +223,17 @@
     function positionMenu() {
       picker.classList.remove("open-up");
       picker.classList.remove("menu-scrollable");
-      menu.style.maxHeight = "";
+      resetFixedMenuGeometry();
       if (typeof trigger.getBoundingClientRect !== "function") return;
 
       const bounds = getPlacementBounds();
       const triggerRect = trigger.getBoundingClientRect();
       const triggerTop = finiteNumber(triggerRect && triggerRect.top);
       const triggerBottom = finiteNumber(triggerRect && triggerRect.bottom);
+      const triggerLeft = finiteNumber(triggerRect && triggerRect.left);
+      const triggerRight = finiteNumber(triggerRect && triggerRect.right);
+      const triggerWidth = finiteNumber(triggerRect && triggerRect.width)
+        || (triggerLeft != null && triggerRight != null ? triggerRight - triggerLeft : null);
       if (!bounds || triggerTop == null || triggerBottom == null) return;
 
       const contentHeight = finiteNumber(menu.scrollHeight) || DEFAULT_MENU_MAX_HEIGHT_PX;
@@ -211,7 +242,15 @@
       const naturalHeight = contentHeight + Math.max(0, offsetHeight - clientHeight);
       const availableAbove = Math.max(0, triggerTop - bounds.top - MENU_GAP_PX);
       const availableBelow = Math.max(0, bounds.bottom - triggerBottom - MENU_GAP_PX);
-      const openUp = availableBelow < naturalHeight && availableAbove > availableBelow;
+      const preferredMinimum = Math.min(naturalHeight, PREFERRED_PLACEMENT_MIN_HEIGHT_PX);
+      let openUp;
+      if (placementPreference === "up") {
+        openUp = availableAbove >= preferredMinimum || availableBelow <= availableAbove;
+      } else if (placementPreference === "down") {
+        openUp = availableBelow < preferredMinimum && availableAbove > availableBelow;
+      } else {
+        openUp = availableBelow < naturalHeight && availableAbove > availableBelow;
+      }
       const availableHeight = openUp ? availableAbove : availableBelow;
       const maxHeight = Math.floor(Math.min(
         DEFAULT_MENU_MAX_HEIGHT_PX,
@@ -222,6 +261,38 @@
       picker.classList.toggle("open-up", openUp);
       picker.classList.toggle("menu-scrollable", maxHeight < naturalHeight);
       menu.style.maxHeight = maxHeight + "px";
+      if (positionStrategy === "viewport-fixed") {
+        const renderedHeight = Math.min(naturalHeight, maxHeight);
+        const maxWidth = bounds.right == null ? null : Math.max(0, bounds.right - bounds.left);
+        const renderedWidth = triggerWidth == null
+          ? null
+          : (maxWidth == null ? triggerWidth : Math.min(triggerWidth, maxWidth));
+        let menuLeft = triggerLeft;
+        if (menuLeft != null) {
+          if (bounds.right != null && renderedWidth != null) {
+            menuLeft = Math.min(menuLeft, bounds.right - renderedWidth);
+          }
+          menuLeft = Math.max(bounds.left, menuLeft);
+          menu.style.left = `${menuLeft}px`;
+        }
+        if (renderedWidth != null) menu.style.width = `${renderedWidth}px`;
+        const menuTop = openUp
+          ? Math.max(bounds.top, triggerTop - MENU_GAP_PX - renderedHeight)
+          : Math.min(triggerBottom + MENU_GAP_PX, bounds.bottom - renderedHeight);
+        menu.style.top = `${Math.max(bounds.top, menuTop)}px`;
+        menu.style.right = "auto";
+        menu.style.bottom = "auto";
+      }
+    }
+
+    function resetFixedMenuGeometry() {
+      menu.style.maxHeight = "";
+      if (positionStrategy !== "viewport-fixed") return;
+      menu.style.top = "";
+      menu.style.right = "";
+      menu.style.bottom = "";
+      menu.style.left = "";
+      menu.style.width = "";
     }
 
     function cancelMenuUnmount() {
@@ -239,8 +310,24 @@
     function resetMenuLayout() {
       picker.classList.remove("open-up");
       picker.classList.remove("menu-scrollable");
-      menu.style.maxHeight = "";
+      resetFixedMenuGeometry();
       menu.scrollTop = 0;
+    }
+
+    function detachScrollBoundary() {
+      if (!scrollBoundary || typeof scrollBoundary.removeEventListener !== "function") return;
+      scrollBoundary.removeEventListener("scroll", closeOnBoundaryScroll);
+      scrollBoundary = null;
+    }
+
+    function attachScrollBoundary() {
+      if (positionStrategy !== "viewport-fixed") return;
+      const nextBoundary = findPlacementBoundary();
+      if (nextBoundary === scrollBoundary) return;
+      detachScrollBoundary();
+      if (!nextBoundary || typeof nextBoundary.addEventListener !== "function") return;
+      scrollBoundary = nextBoundary;
+      scrollBoundary.addEventListener("scroll", closeOnBoundaryScroll);
     }
 
     function revealOptionInMenu(option) {
@@ -341,7 +428,7 @@
 
     function reflow() {
       if (disposed) return;
-      ensureVisible();
+      if (positionStrategy !== "viewport-fixed") ensureVisible();
       if (isOpen) positionMenu();
     }
 
@@ -365,6 +452,7 @@
       const nextOpen = !!next && optionElements.length > 0 && !isInteractionLocked();
       if (nextOpen) {
         isOpen = true;
+        attachScrollBoundary();
         mountMenu();
         positionMenu();
         // positionMenu reads layout after the menu is mounted, so the browser
@@ -372,6 +460,7 @@
         picker.classList.add("open");
       } else {
         isOpen = false;
+        detachScrollBoundary();
         picker.classList.remove("open");
         scheduleMenuUnmount();
       }
@@ -505,6 +594,9 @@
       event.preventDefault();
       setOpen(false, { focusTrigger: true });
     };
+    function closeOnBoundaryScroll() {
+      if (isOpen) setOpen(false);
+    }
     if (document && typeof document.addEventListener === "function") {
       document.addEventListener("click", closeOnOutsideClick);
       document.addEventListener("keydown", closeOnEscape);
@@ -552,6 +644,7 @@
       dispose() {
         if (disposed) return;
         cancelMenuUnmount();
+        detachScrollBoundary();
         isOpen = false;
         picker.classList.remove("open");
         picker.classList.remove("menu-mounted");

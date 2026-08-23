@@ -12,6 +12,51 @@
   let customizationSelectionPendingThemeId = null;
   let customizationSelectionSeq = 0;
   let mountedCustomizationControls = null;
+  let themeListScrollTop = 0;
+  let customizationReturnFocusKey = "";
+
+  function getContentElement() {
+    return document.getElementById("content");
+  }
+
+  function focusSettingsKey(focusKey) {
+    const content = getContentElement();
+    if (!content || !focusKey) return;
+    const queue = Array.from(content.children || []);
+    while (queue.length > 0) {
+      const element = queue.shift();
+      if (element && typeof element.getAttribute === "function"
+          && element.getAttribute("data-settings-focus-key") === focusKey) {
+        if (element.disabled !== true && typeof element.focus === "function") {
+          try { element.focus({ preventScroll: true }); } catch (_) { element.focus(); }
+        }
+        return;
+      }
+      if (element && element.children) queue.push(...Array.from(element.children));
+    }
+  }
+
+  function stabilizeCustomizationView({ themeId = null, scrollTop, focusKey }) {
+    const apply = () => {
+      if (state.activeTab !== "theme") return;
+      if (themeId ? customizingThemeId !== themeId : customizingThemeId !== null) return;
+      const content = getContentElement();
+      if (content) content.scrollTop = scrollTop;
+      focusSettingsKey(focusKey);
+    };
+    apply();
+    if (root && typeof root.requestAnimationFrame === "function") root.requestAnimationFrame(apply);
+  }
+
+  function enterThemeCustomization(themeId) {
+    customizingThemeId = themeId;
+    ops.requestRender({ content: true });
+    stabilizeCustomizationView({
+      themeId,
+      scrollTop: 0,
+      focusKey: "theme-customization-back",
+    });
+  }
 
   function t(key) {
     return helpers.t(key);
@@ -226,9 +271,11 @@
 
   function openThemeCustomization(theme) {
     if (!theme || !supportsThemeCustomization(theme)) return;
+    const content = getContentElement();
+    themeListScrollTop = content && Number.isFinite(content.scrollTop) ? content.scrollTop : 0;
+    customizationReturnFocusKey = `theme-customize:${theme.id}`;
     if (theme.active) {
-      customizingThemeId = theme.id;
-      ops.requestRender({ content: true });
+      enterThemeCustomization(theme.id);
       return;
     }
     if (customizationSelectionPendingThemeId) return;
@@ -259,7 +306,10 @@
       .finally(() => {
         if (requestSeq !== customizationSelectionSeq) return;
         customizationSelectionPendingThemeId = null;
-        if (state.activeTab === "theme") ops.requestRender({ content: true });
+        if (state.activeTab === "theme") {
+          if (customizingThemeId === theme.id) enterThemeCustomization(theme.id);
+          else ops.requestRender({ content: true });
+        }
       });
   }
 
@@ -267,6 +317,10 @@
     customizingThemeId = null;
     mountedCustomizationControls = null;
     ops.requestRender({ content: true });
+    stabilizeCustomizationView({
+      scrollTop: themeListScrollTop,
+      focusKey: customizationReturnFocusKey,
+    });
   }
 
   function renderThemeDetail(parent, theme) {
@@ -280,6 +334,7 @@
     const back = document.createElement("button");
     back.type = "button";
     back.className = "theme-detail-back";
+    back.setAttribute("data-settings-focus-key", "theme-customization-back");
     back.textContent = `\u2039 ${t("themeBackToPets")}`;
     back.addEventListener("click", closeThemeCustomization);
     parent.appendChild(back);
@@ -409,6 +464,8 @@
       options: pickerOptions,
       ariaLabel: t("rowPetColor"),
       className: "pet-tint-select",
+      positionStrategy: "viewport-fixed",
+      placementPreference: "down",
       disabled: options.length === 0,
       onChange(next) {
         const committed = getThemeTintId(theme.id, options);
@@ -477,6 +534,8 @@
       options: pickerOptions,
       ariaLabel: t("rowPetAccessory"),
       className: "pet-accessory-select",
+      positionStrategy: "viewport-fixed",
+      placementPreference: "up",
       disabled: options.length === 0,
       onChange(next) {
         const committed = getThemeAccessoryId(theme.id, options);
@@ -842,6 +901,7 @@
       btn.className = "theme-customize-btn";
       btn.type = "button";
       btn.textContent = `${t("themeCustomize")} \u203a`;
+      btn.setAttribute("data-settings-focus-key", `theme-customize:${theme.id}`);
       btn.setAttribute("aria-label", `${t("themeCustomize")}: ${localizeField(theme.name) || theme.id}`);
       btn.disabled = !!customizationSelectionPendingThemeId;
       if (customizationSelectionPendingThemeId === theme.id) btn.classList.add("pending");
@@ -1118,6 +1178,8 @@
         customizingThemeId = null;
         customizationSelectionPendingThemeId = null;
         mountedCustomizationControls = null;
+        themeListScrollTop = 0;
+        customizationReturnFocusKey = "";
       },
     };
   }
