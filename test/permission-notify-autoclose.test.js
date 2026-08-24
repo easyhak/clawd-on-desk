@@ -87,7 +87,10 @@ function createPermissionHarness({
       }
       if (typeof this._didFinishLoad === "function") this._didFinishLoad();
     }
-    showInactive() {}
+    showInactive() { this.visible = true; }
+    hide() { this.visible = false; }
+    isVisible() { return this.visible === true; }
+    focus() {}
     setSkipTaskbar() {}
     on(event, cb) {
       if (event === "closed") this._closedHandler = cb;
@@ -290,7 +293,7 @@ describe("permission passive notify auto-close refresh", () => {
     assert.strictEqual(api.refreshPassiveNotifyAutoClose(), 0);
     assert.strictEqual(api.pendingPermissions.length, 1);
 
-    api.handleDecide({ sender: { __window: entry.bubble } }, "codex-user-input-focus");
+    api.handleDecide({ sender: { __window: api.getPermissionSurfaceWindow() } }, "codex-user-input-focus");
     assert.strictEqual(api.pendingPermissions.length, 0);
     assert.strictEqual(harness.focused.length, 1);
     assert.strictEqual(harness.focused[0][0], "codex-a");
@@ -384,7 +387,7 @@ describe("permission passive notify auto-close refresh", () => {
     assert.strictEqual(api.pendingPermissions.length, 1);
 
     const existing = api.pendingPermissions[0];
-    const originalBubble = existing.bubble;
+    const originalBubble = api.getPermissionSurfaceWindow();
     const firstCreatedAt = existing.createdAt;
 
     mock.timers.tick(500);
@@ -392,7 +395,7 @@ describe("permission passive notify auto-close refresh", () => {
 
     assert.strictEqual(api.pendingPermissions.length, 1);
     assert.strictEqual(api.pendingPermissions[0], existing);
-    assert.strictEqual(existing.bubble, originalBubble);
+    assert.strictEqual(api.getPermissionSurfaceWindow(), originalBubble);
     assert.strictEqual(existing.toolInput.command, "second");
     assert.ok(existing.createdAt > firstCreatedAt);
 
@@ -447,7 +450,7 @@ describe("permission passive notify auto-close refresh", () => {
     });
     assert.strictEqual(api.pendingPermissions.length, 1);
     const existing = api.pendingPermissions[0];
-    const originalBubble = existing.bubble;
+    const originalBubble = api.getPermissionSurfaceWindow();
     const firstCreatedAt = existing.createdAt;
 
     // Request #2 for the same session: the stale cue must be replaced, not
@@ -462,7 +465,7 @@ describe("permission passive notify auto-close refresh", () => {
 
     assert.strictEqual(api.pendingPermissions.length, 1);
     assert.strictEqual(api.pendingPermissions[0], existing);
-    assert.strictEqual(existing.bubble, originalBubble);
+    assert.strictEqual(api.getPermissionSurfaceWindow(), originalBubble);
     assert.strictEqual(existing.toolInput.command, "rm -rf build");
     assert.strictEqual(existing.kimiToolName, "Bash");
     assert.deepStrictEqual(existing.kimiToolInput, { command: "rm -rf build" });
@@ -474,9 +477,9 @@ describe("permission passive notify auto-close refresh", () => {
     assert.ok(shows.length >= 2, "refresh should re-send permission-show");
     const lastShow = shows[shows.length - 1];
     const payload = lastShow[1];
-    assert.strictEqual(payload.toolName, "KimiPermission");
-    assert.strictEqual(payload.kimiToolName, "Bash");
-    assert.deepStrictEqual(payload.kimiToolInput, { command: "rm -rf build" });
+    assert.strictEqual(payload.active.toolName, "KimiPermission");
+    assert.strictEqual(payload.active.kimiToolName, "Bash");
+    assert.deepStrictEqual(payload.active.kimiToolInput, { command: "rm -rf build" });
 
     // A legacy-shaped refresh downgrades to the generic copy — the generic
     // line can't be wrong; a stale rich cue can.
@@ -521,10 +524,11 @@ describe("Kimi passive cue rebuild after dismissal (gate-ledger joint lifecycle)
     });
     assert.strictEqual(api.pendingPermissions.length, 1);
     const first = api.pendingPermissions[0];
-    assert.ok(first.bubble, "first cue should own a bubble window");
+    const firstSurface = api.getPermissionSurfaceWindow();
+    assert.ok(firstSurface, "first cue should be presented by the shared surface");
 
     // "Got it" travels the production ipc-decide path.
-    api.handleDecide({ sender: { __window: first.bubble } }, "allow");
+    api.handleDecide({ sender: { __window: firstSurface } }, "allow");
     assert.strictEqual(api.pendingPermissions.length, 0);
 
     // state.js re-arms ~800ms later with the next gate's detail.
@@ -540,7 +544,8 @@ describe("Kimi passive cue rebuild after dismissal (gate-ledger joint lifecycle)
     assert.strictEqual(second.isKimiNotify, true);
     assert.strictEqual(second.kimiToolName, "shell");
     assert.deepStrictEqual(second.kimiToolInput, { command: "Remove-Item a.txt" });
-    assert.ok(second.bubble && !second.bubble.destroyed, "re-armed cue should own a live bubble window");
+    assert.ok(api.getPermissionSurfaceWindow() && !api.getPermissionSurfaceWindow().destroyed,
+      "re-armed cue should use a live permission surface");
   });
 
   it("rebuilds a fresh card after the previous cue auto-expired", () => {
@@ -570,7 +575,7 @@ describe("Kimi passive cue rebuild after dismissal (gate-ledger joint lifecycle)
     const second = api.pendingPermissions[0];
     assert.notStrictEqual(second, first);
     assert.strictEqual(second.kimiToolName, "shell");
-    assert.ok(second.bubble && !second.bubble.destroyed);
+    assert.ok(api.getPermissionSurfaceWindow() && !api.getPermissionSurfaceWindow().destroyed);
   });
 });
 
@@ -620,10 +625,12 @@ describe("interactive permission bubble fatal fallback", () => {
 
   it("does not announce when BrowserWindow construction fails", () => {
     const harness = createPermissionHarness({ loadBehavior: "constructor-throw" });
-    const { entry } = makeBlockingEntry();
+    const { entry, response } = makeBlockingEntry();
     harness.api.pendingPermissions.push(entry);
 
-    assert.throws(() => harness.api.showPermissionBubble(entry), /BrowserWindow unavailable/);
+    assert.doesNotThrow(() => harness.api.showPermissionBubble(entry));
+    assert.strictEqual(harness.api.pendingPermissions.length, 0);
+    assert.strictEqual(response.destroyed, true);
     assert.deepStrictEqual(harness.slackAnnouncements, []);
   });
 
@@ -686,7 +693,7 @@ describe("interactive permission bubble fatal fallback", () => {
     entry.createdAt = Date.now() - 5000;
     harness.api.pendingPermissions.push(entry);
     harness.api.showPermissionBubble(entry);
-    entry.bubble.webContents = null;
+    harness.api.getPermissionSurfaceWindow().webContents = null;
 
     assert.doesNotThrow(() => {
       harness.api.resolvePermissionEntry(entry, "no-decision", "test cleanup");
@@ -726,7 +733,7 @@ describe("interactive permission bubble fatal fallback", () => {
     assert.strictEqual(harness.api.pendingPermissions.length, 1);
 
     const entry = harness.api.pendingPermissions[0];
-    const bubble = entry.bubble;
+    const bubble = harness.api.getPermissionSurfaceWindow();
     bubble.webContents.isDestroyed = () => true;
     bubble.webContents.send = () => {
       throw new Error("send must not target destroyed webContents");

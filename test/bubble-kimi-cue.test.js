@@ -46,7 +46,7 @@ describe("bubble-renderer Kimi tool-aware cue", () => {
 
   it("reuses the standard cue path: formatDetail, MCP relabel, irreversible hint", () => {
     const branch = kimiBranch();
-    assert.match(branch, /formatDetail\(kimiTool, kimiInput\)/);
+    assert.match(branch, /formatActiveDetail\(kimiTool, kimiInput\)/);
     assert.match(branch, /parseMcpToolName\(kimiTool\)/);
     assert.match(branch, /detectIrreversible\(kimiTool, kimiInput\)/);
     // The pill shows the real tool so per-tool CSS (data-tool="Bash" etc.)
@@ -75,7 +75,7 @@ describe("bubble-renderer Kimi tool-aware cue", () => {
     // returns nothing.
     assert.match(
       branch,
-      /formatDetail\(kimiTool, kimiInput\)\s*\|\| \(data\.toolInput && data\.toolInput\.command\)\s*\|\| bubbleText\(data\.lang, "checkKimiTerminal"\)/
+      /formatActiveDetail\(kimiTool, kimiInput\)\s*\|\| \(data\.toolInput && data\.toolInput\.command\)\s*\|\| bubbleText\(data\.lang, "checkKimiTerminal"\)/
     );
   });
 
@@ -95,7 +95,7 @@ describe("bubble-renderer Kimi tool-aware cue", () => {
       branch.replace('suggestionsContainer.innerHTML = "";', ""),
       /innerHTML/
     );
-    assert.match(branch, /commandBlock\.textContent = formatDetail/);
+    assert.match(branch, /commandBlock\.textContent = formatActiveDetail/);
   });
 });
 

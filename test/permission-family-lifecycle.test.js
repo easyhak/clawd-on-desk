@@ -237,13 +237,9 @@ describe("opencode-family external lifecycle runtime", () => {
     const { api } = harness;
     let timerFires = 0;
     let remoteAborts = 0;
-    let allExactWereDeadAtHide = false;
     const exactA = familyEntry();
     const exactB = familyEntry({
-      bubble: makeBubble(() => {
-        allExactWereDeadAtHide = !api.pendingPermissions.includes(exactA)
-          && !api.pendingPermissions.includes(exactB);
-      }),
+      bubble: makeBubble(),
       _delayTimer: setTimeout(() => { timerFires += 1; }, 40),
       autoCloseTimer: setTimeout(() => { timerFires += 1; }, 40),
       autoExpireTimer: setTimeout(() => { timerFires += 1; }, 40),
@@ -277,9 +273,6 @@ describe("opencode-family external lifecycle runtime", () => {
     assertSecretAbsentFromLifecycleLogs(harness, "token_life");
 
     assert.deepStrictEqual(api.pendingPermissions, [sameSessionOtherRequest, otherAgent]);
-    assert.strictEqual(allExactWereDeadAtHide, true, "all exact entries must be non-live before renderer teardown");
-    assert.strictEqual(exactA.bubble.hidden, true);
-    assert.strictEqual(exactB.bubble.hidden, true);
     assert.strictEqual(exactB._delayTimer, null);
     assert.strictEqual(exactB.autoCloseTimer, null);
     assert.strictEqual(exactB.autoExpireTimer, null);
@@ -391,7 +384,6 @@ describe("opencode-family lifecycle route → real runtime", () => {
     assert.strictEqual(lifecycleResult.res.headers["x-clawd-server"], "clawd-on-desk");
     assert.deepStrictEqual(lifecycleResult.recorder, []);
     assert.strictEqual(harness.api.pendingPermissions.length, 0);
-    assert.strictEqual(entry.bubble.hidden, true);
     assert.strictEqual(harness.calls.updateSession.length, 1, "lifecycle must not publish another PermissionRequest");
     assert.strictEqual(harness.calls.showPermissionBubble.length, 1);
     assert.deepStrictEqual(harness.calls.replyOpencodeFamilyPermission, []);

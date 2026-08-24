@@ -1652,6 +1652,7 @@ const topmostRuntime = createTopmostRuntime({
   getHitWin: () => hitWin,
   recoverCloakedPet: () => petWindowRuntime.recoverIfCloaked(),
   getPendingPermissions: () => pendingPermissions,
+  getPermissionBubbleWindows: () => _perm.getPermissionBubbleWindows(),
   getUpdateBubbleWindow: () => _updateBubble.getBubbleWindow(),
   getSessionHudWindow: () => getSessionHudWindow(),
   getQuotaRingWindow: () => getQuotaRingWindow(),
@@ -1865,6 +1866,8 @@ const {
 
 floatingWindowRuntime = createFloatingWindowRuntime({
   getPendingPermissions: () => pendingPermissions,
+  getPermissionBubbleWindows: () => _perm.getPermissionBubbleWindows(),
+  setPermissionPetHidden: (hidden) => _perm.setPermissionPetHidden(hidden),
   repositionPermissionBubbles: () => repositionBubbles(),
   repositionUpdateBubble: () => repositionUpdateBubble(),
   repositionSessionHud: () => repositionSessionHud(),
@@ -2067,6 +2070,7 @@ const sessions = _state.sessions;
 async function showSessionAutomationWarning(entry) {
   const parent = selectSessionAutomationDialogParent({
     entry,
+    permissionSurfaceWindow: _perm.getPermissionSurfaceWindow(),
     petWindow: win,
   });
   return permissionAutomationConfirmationRuntime.confirmPermissionAutomation({

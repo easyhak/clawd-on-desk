@@ -31,10 +31,39 @@ function loadPermissionWithElectron(fakeElectron = null) {
 
 function createCodexDecisionHarness() {
   const focusCalls = [];
+  class FakeBrowserWindow {
+    constructor() {
+      this.destroyed = false;
+      this.visible = false;
+      this.listeners = new Map();
+      this.sentEvents = [];
+      this.webContents = {
+        once: (name, listener) => this.listeners.set(name, listener),
+        on: (name, listener) => this.listeners.set(name, listener),
+        send: (...args) => this.sentEvents.push(args),
+        isDestroyed: () => this.destroyed,
+      };
+    }
+    static fromWebContents(sender) { return sender && sender.__window ? sender.__window : null; }
+    setAlwaysOnTop() {}
+    setBounds(bounds) { this.bounds = bounds; }
+    getBounds() { return this.bounds || { x: 0, y: 0, width: 420, height: 240 }; }
+    setSkipTaskbar() {}
+    showInactive() { this.visible = true; }
+    hide() { this.visible = false; }
+    focus() {}
+    isVisible() { return this.visible; }
+    isDestroyed() { return this.destroyed; }
+    on(name, listener) { this.listeners.set(name, listener); }
+    loadFile() { this.listeners.get("did-finish-load")?.(); }
+    destroy() {
+      if (this.destroyed) return;
+      this.destroyed = true;
+      this.listeners.get("closed")?.();
+    }
+  }
   const fakeElectron = {
-    BrowserWindow: Object.assign(class {}, {
-      fromWebContents(sender) { return sender && sender.__window ? sender.__window : null; },
-    }),
+    BrowserWindow: FakeBrowserWindow,
     globalShortcut: {
       register() { return true; },
       unregister() {},
@@ -46,13 +75,38 @@ function createCodexDecisionHarness() {
     sessions: new Map(),
     hideBubbles: false,
     petHidden: false,
-    win: null,
+    win: { isDestroyed: () => false },
     lang: "en",
     getBubblePolicy: () => ({ enabled: true, autoCloseMs: null }),
+    getSettingsSnapshot: () => ({ shortcuts: {} }),
+    isAgentPermissionsEnabled: () => true,
+    subscribeShortcuts: () => () => {},
+    clearShortcutFailure() {},
+    reportShortcutFailure() {},
+    getPetWindowBounds: () => ({ x: 0, y: 0, width: 128, height: 128 }),
+    getNearestWorkArea: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+    getHitRectScreen: () => null,
+    getHudReservedOffset: () => 0,
+    guardAlwaysOnTop() {},
+    reapplyMacVisibility() {},
+    repositionUpdateBubble() {},
     focusTerminalForSession: (sessionId, options) => focusCalls.push([sessionId, options]),
     permDebugLog: null,
   });
-  return { api, focusCalls };
+  function present(entry) {
+    api.addPendingPermission(entry, "test-present");
+    api.showPermissionBubble(entry);
+    const surface = api.getPermissionSurfaceWindow();
+    const envelope = [...surface.sentEvents].reverse().find(([name]) => name === "permission-show")[1];
+    api.handleBubbleHeight({ sender: { __window: surface } }, {
+      height: 240,
+      surfaceRevision: envelope.surfaceRevision,
+      activeEntryId: envelope.activeEntryId,
+      entryIds: envelope.entryIds,
+    });
+    return { sender: { __window: surface } };
+  }
+  return { api, focusCalls, present };
 }
 
 function createFakeRes() {
@@ -197,7 +251,7 @@ describe("Codex permission response sanitizer", () => {
   });
 
   it("treats Codex deny-and-focus as immediate no-decision instead of hanging the socket", () => {
-    const { api, focusCalls } = createCodexDecisionHarness();
+    const { api, focusCalls, present } = createCodexDecisionHarness();
     const res = createFakeRes();
     const bubble = createFakeBubble();
     const permEntry = {
@@ -221,9 +275,9 @@ describe("Codex permission response sanitizer", () => {
       codexOriginator: "Codex Desktop",
       codexSource: "vscode",
     };
-    api.pendingPermissions.push(permEntry);
+    const event = present(permEntry);
 
-    api.handleDecide({ sender: { __window: bubble } }, "deny-and-focus");
+    api.handleDecide(event, "deny-and-focus");
 
     assert.strictEqual(res.statusCode, 204);
     assert.strictEqual(res.writableEnded, true);
@@ -249,10 +303,10 @@ describe("Codex permission response sanitizer", () => {
   });
 
   it("treats Qwen deny-and-focus as immediate no-decision and focuses terminal", () => {
-    const { api, focusCalls } = createCodexDecisionHarness();
+    const { api, focusCalls, present } = createCodexDecisionHarness();
     const res = createFakeRes();
     const bubble = createFakeBubble();
-    api.pendingPermissions.push({
+    const permEntry = {
       res,
       abortHandler: () => {},
       suggestions: [],
@@ -269,9 +323,9 @@ describe("Codex permission response sanitizer", () => {
       agentPid: 456,
       pidChain: [789, 456],
       model: "qwen3-coder-plus",
-    });
+    };
 
-    api.handleDecide({ sender: { __window: bubble } }, "deny-and-focus");
+    api.handleDecide(present(permEntry), "deny-and-focus");
 
     assert.strictEqual(res.statusCode, 204);
     assert.strictEqual(res.body, "");
@@ -293,7 +347,7 @@ describe("Codex permission response sanitizer", () => {
   });
 
   it("focuses the originating terminal when the Kimi cue's Got it button is clicked", () => {
-    const { api, focusCalls } = createCodexDecisionHarness();
+    const { api, focusCalls, present } = createCodexDecisionHarness();
     const bubble = createFakeBubble();
     const permEntry = {
       res: null,
@@ -308,25 +362,24 @@ describe("Codex permission response sanitizer", () => {
       agentId: "kimi-cli",
       isKimiNotify: true,
     };
-    api.pendingPermissions.push(permEntry);
+    const event = present(permEntry);
 
     // The renderer sends "allow" for the relabeled "Got it" button; the passive
     // branch dismisses regardless of the behavior value, and Kimi additionally
     // brings the terminal forward so the native approve/reject prompt is in view.
-    api.handleDecide({ sender: { __window: bubble } }, "allow");
+    api.handleDecide(event, "allow");
 
     assert.deepStrictEqual(focusCalls, [[
       "kimi-cli:s1",
       { fallbackEntry: { id: "kimi-cli:s1", agentId: "kimi-cli" } },
     ]]);
-    assert.strictEqual(bubble.hidden, true);
     assert.strictEqual(api.pendingPermissions.length, 0);
   });
 
   it("dismisses a Codex passive notify without focusing the terminal", () => {
-    const { api, focusCalls } = createCodexDecisionHarness();
+    const { api, focusCalls, present } = createCodexDecisionHarness();
     const bubble = createFakeBubble();
-    api.pendingPermissions.push({
+    const permEntry = {
       res: null,
       abortHandler: null,
       suggestions: [],
@@ -338,24 +391,23 @@ describe("Codex permission response sanitizer", () => {
       createdAt: Date.now(),
       agentId: "codex",
       isCodexNotify: true,
-    });
+    };
 
-    api.handleDecide({ sender: { __window: bubble } }, "allow");
+    api.handleDecide(present(permEntry), "allow");
 
     // The focus-on-dismiss affordance is Kimi-only: Codex notify stays a plain
     // acknowledge. Pins the shared passive-notify branch against accidental
     // scope creep.
     assert.deepStrictEqual(focusCalls, []);
-    assert.strictEqual(bubble.hidden, true);
     assert.strictEqual(api.pendingPermissions.length, 0);
   });
 
   it("does not let Codex take suggestion or opencode-only decision paths", () => {
     for (const behavior of ["suggestion:0", "family-always"]) {
-      const { api } = createCodexDecisionHarness();
+      const { api, present } = createCodexDecisionHarness();
       const res = createFakeRes();
       const bubble = createFakeBubble();
-      api.pendingPermissions.push({
+      const permEntry = {
         res,
         abortHandler: () => {},
         suggestions: [{ type: "setMode", mode: "default" }],
@@ -367,9 +419,9 @@ describe("Codex permission response sanitizer", () => {
         createdAt: Date.now(),
         agentId: "codex",
         isCodex: true,
-      });
+      };
 
-      api.handleDecide({ sender: { __window: bubble } }, behavior);
+      api.handleDecide(present(permEntry), behavior);
 
       assert.strictEqual(res.statusCode, 204);
       assert.strictEqual(res.body, "");
@@ -378,7 +430,7 @@ describe("Codex permission response sanitizer", () => {
   });
 
   it("treats Antigravity deny-and-focus as immediate no-decision instead of hanging the socket", () => {
-    const { api, focusCalls } = createCodexDecisionHarness();
+    const { api, focusCalls, present } = createCodexDecisionHarness();
     const res = createFakeRes();
     const bubble = createFakeBubble();
     const permEntry = {
@@ -399,9 +451,9 @@ describe("Codex permission response sanitizer", () => {
       pidChain: [789, 456],
       platform: "win32",
     };
-    api.pendingPermissions.push(permEntry);
+    const event = present(permEntry);
 
-    api.handleDecide({ sender: { __window: bubble } }, "deny-and-focus");
+    api.handleDecide(event, "deny-and-focus");
 
     assert.strictEqual(res.statusCode, 204);
     assert.strictEqual(res.writableEnded, true);
@@ -425,10 +477,10 @@ describe("Codex permission response sanitizer", () => {
 
   it("responds to Antigravity allow and deny with direct hook stdout shape", () => {
     for (const behavior of ["allow", "deny"]) {
-      const { api } = createCodexDecisionHarness();
+      const { api, present } = createCodexDecisionHarness();
       const res = createFakeRes();
       const bubble = createFakeBubble();
-      api.pendingPermissions.push({
+      const permEntry = {
         res,
         abortHandler: () => {},
         suggestions: [],
@@ -440,9 +492,9 @@ describe("Codex permission response sanitizer", () => {
         createdAt: Date.now(),
         agentId: "antigravity-cli",
         isAntigravity: true,
-      });
+      };
 
-      api.handleDecide({ sender: { __window: bubble } }, behavior);
+      api.handleDecide(present(permEntry), behavior);
 
       assert.strictEqual(res.statusCode, 200);
       const parsed = JSON.parse(res.body);
@@ -534,12 +586,6 @@ describe("Codex permission response sanitizer", () => {
     assert.strictEqual(claudeRes.destroyed, true);
     assert.strictEqual(opencodeRes.destroyed, false);
     assert.strictEqual(opencodeRes.statusCode, null);
-    assert.strictEqual(codexBubble.hidden, true);
-    assert.strictEqual(qwenBubble.hidden, true);
-    assert.strictEqual(claudeBubble.hidden, true);
-    assert.strictEqual(opencodeBubble.hidden, true);
-    assert.strictEqual(antigravityBubble.hidden, true);
-    assert.strictEqual(notifyBubble.hidden, true);
     assert.strictEqual(api.pendingPermissions.length, 0);
   });
 

@@ -17,8 +17,31 @@ const { classifyPermissionInteraction } = require("../src/permission-automation-
 // returns the binary path string (no BrowserWindow), so without this mock the
 // handleDecide-driven tests below would throw. The mock resolves a sender to its
 // window via a `__win` sentinel; globalShortcut is stubbed to harmless no-ops.
+class FakeBrowserWindow {
+  constructor() {
+    this.destroyed = false;
+    this.visible = false;
+    this.listeners = new Map();
+    this.webContents = {
+      once: (event, listener) => this.listeners.set(event, listener),
+      on: (event, listener) => this.listeners.set(event, listener),
+      send() {},
+    };
+  }
+  static fromWebContents(sender) { return (sender && sender.__win) || null; }
+  setAlwaysOnTop() {}
+  setBounds() {}
+  setSkipTaskbar() {}
+  showInactive() { this.visible = true; }
+  hide() { this.visible = false; }
+  isVisible() { return this.visible; }
+  isDestroyed() { return this.destroyed; }
+  on(event, listener) { this.listeners.set(event, listener); }
+  loadFile() { this.listeners.get("did-finish-load")?.(); }
+  destroy() { this.destroyed = true; this.listeners.get("closed")?.(); }
+}
 const __electronMock = {
-  BrowserWindow: { fromWebContents: (sender) => (sender && sender.__win) || null },
+  BrowserWindow: FakeBrowserWindow,
   globalShortcut: {
     register: () => {}, unregister: () => {}, unregisterAll: () => {}, isRegistered: () => false,
   },
@@ -132,10 +155,8 @@ function makePlanPermEntry(res, overrides = {}) {
   return entry;
 }
 
-// Fake bubble window + IPC event. handleDecide() calls
-// BrowserWindow.fromWebContents(event.sender) (mocked above) which resolves
-// event.sender.__win back to the perm's bubble, so the lookup
-// pendingPermissions.find(p => p.bubble === senderWin) matches.
+// Fake window + IPC event. handleDecide() resolves event.sender.__win back to
+// the current shared permission surface.
 function makeFakeBubble() {
   return { isDestroyed: () => false, webContents: { send: () => {} }, destroy: () => {} };
 }
@@ -282,9 +303,10 @@ describe("permission plan-feedback handleDecide routing (IPC entry point)", () =
     const ctx = makeCtx();
     const perm = initPermission(ctx);
     const res = createMockResponse();
-    const bubble = makeFakeBubble();
-    const permEntry = makePlanPermEntry(res, { bubble, ...permOverrides });
+    const permEntry = makePlanPermEntry(res, permOverrides);
     perm.pendingPermissions.push(permEntry);
+    perm.showPermissionBubble(permEntry);
+    const bubble = perm.getPermissionSurfaceWindow();
     return { ctx, perm, res, bubble, permEntry };
   }
 

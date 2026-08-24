@@ -94,7 +94,7 @@ function createContext() {
     getSettingsSnapshot: () => ({ shortcuts: {} }),
     subscribeShortcuts: () => () => {},
     getBubblePolicy: () => ({ enabled: true, autoCloseMs: null }),
-    getPetWindowBounds: () => null,
+    getPetWindowBounds: () => ({ x: 100, y: 100, width: 128, height: 128 }),
     getNearestWorkArea: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
     getHitRectScreen: () => null,
     getHudReservedOffset: () => 0,
@@ -115,9 +115,33 @@ function createContext() {
 
 function loadPermission() {
   const globalShortcut = createGlobalShortcut();
+  class FakeBrowserWindow {
+    constructor() {
+      this.destroyed = false;
+      this.visible = false;
+      this.listeners = new Map();
+      this.webContents = {
+        once: (event, listener) => this.listeners.set(event, listener),
+        on: (event, listener) => this.listeners.set(event, listener),
+        send() {},
+      };
+    }
+    setAlwaysOnTop() {}
+    setBounds() {}
+    setSkipTaskbar() {}
+    showInactive() { this.visible = true; }
+    hide() { this.visible = false; }
+    isVisible() { return this.visible; }
+    isDestroyed() { return this.destroyed; }
+    on(event, listener) { this.listeners.set(event, listener); }
+    loadFile() { this.listeners.get("did-finish-load")?.(); }
+    destroy() { this.destroyed = true; this.listeners.get("closed")?.(); }
+  }
   const initPermission = loadPermissionWithMocks({
     electron: {
-      BrowserWindow: Object.assign(class {}, { fromWebContents() { return null; } }),
+      BrowserWindow: Object.assign(FakeBrowserWindow, {
+        fromWebContents(sender) { return sender && sender.__window || null; },
+      }),
       globalShortcut,
     },
   });
@@ -144,19 +168,28 @@ function pushPending(permission, { bubble = null, res = createResponse() } = {})
   return entry;
 }
 
+function present(permission, options = {}) {
+  const entry = pushPending(permission, options);
+  permission.showPermissionBubble(entry);
+  const surface = permission.getPermissionSurfaceWindow();
+  assert.ok(surface);
+  permission.handleBubbleHeight({ sender: { __window: surface } }, 180);
+  return { entry, surface };
+}
+
 afterEach(() => {
   delete require.cache[PERMISSION_MODULE_PATH];
 });
 
 test("pet hidden: hotkeys unregister when only collapsed bubbles remain", () => {
   const { permission, context, globalShortcut } = loadPermission();
-  pushPending(permission, { bubble: createFakeBubble({ visible: true }) });
-  permission.syncPermissionShortcuts();
+  const { surface } = present(permission);
   assert.ok(globalShortcut.registered.has(ALLOW_ACCEL));
 
   // Hiding the pet collapses the pending bubble, then re-syncs the shortcuts.
   context.petHidden = true;
-  permission.pendingPermissions[0].bubble.hide();
+  permission.setPermissionPetHidden(true);
+  surface.hide();
   permission.syncPermissionShortcuts();
 
   assert.strictEqual(globalShortcut.registered.size, 0);
@@ -164,9 +197,11 @@ test("pet hidden: hotkeys unregister when only collapsed bubbles remain", () => 
 
 test("pet hidden: a new visible bubble keeps the hotkeys registered", () => {
   const { permission, context, globalShortcut } = loadPermission();
+  const old = present(permission);
   context.petHidden = true;
-  pushPending(permission, { bubble: createFakeBubble({ visible: true }) });
-  permission.syncPermissionShortcuts();
+  permission.setPermissionPetHidden(true);
+  old.surface.hide();
+  present(permission);
 
   assert.ok(globalShortcut.registered.has(ALLOW_ACCEL));
   assert.ok(globalShortcut.registered.has(DENY_ACCEL));
@@ -176,16 +211,11 @@ test("pet hidden: hotkey resolves the visible request, never the collapsed one",
   const { permission, context, globalShortcut } = loadPermission();
   const collapsedRes = createResponse();
   const visibleRes = createResponse();
-  const collapsed = pushPending(permission, {
-    bubble: createFakeBubble({ visible: false }),
-    res: collapsedRes,
-  });
-  pushPending(permission, {
-    bubble: createFakeBubble({ visible: true }),
-    res: visibleRes,
-  });
+  const collapsed = present(permission, { res: collapsedRes }).entry;
   context.petHidden = true;
-  permission.syncPermissionShortcuts();
+  permission.setPermissionPetHidden(true);
+  permission.getPermissionSurfaceWindow().hide();
+  present(permission, { res: visibleRes });
 
   const handler = globalShortcut.registered.get(ALLOW_ACCEL);
   assert.strictEqual(typeof handler, "function");
@@ -200,39 +230,28 @@ test("pet hidden: hotkey resolves the visible request, never the collapsed one",
   assert.strictEqual(globalShortcut.registered.size, 0);
 });
 
-// Defensive: real hide semantics only produce collapsed-older + visible-newer,
-// but the invariant is "newest VISIBLE wins", not "newest pending" — lock it in
-// against a future reordering or an out-of-band collapsed newer bubble.
-test("pet hidden: hotkey targets the newest visible request even when a newer one is collapsed", () => {
-  const { permission, context, globalShortcut } = loadPermission();
-  const visibleRes = createResponse();
-  const collapsedRes = createResponse();
-  pushPending(permission, {
-    bubble: createFakeBubble({ visible: true }),
-    res: visibleRes,
-  });
-  pushPending(permission, {
-    bubble: createFakeBubble({ visible: false }),
-    res: collapsedRes,
-  });
-  context.petHidden = true;
-  permission.syncPermissionShortcuts();
+test("pet visible: a newer queued request does not steal the active hotkey", () => {
+  const { permission, globalShortcut } = loadPermission();
+  const activeRes = createResponse();
+  const queuedRes = createResponse();
+  present(permission, { res: activeRes });
+  const queued = pushPending(permission, { res: queuedRes });
+  permission.showPermissionBubble(queued);
 
   const handler = globalShortcut.registered.get(ALLOW_ACCEL);
   assert.strictEqual(typeof handler, "function");
   handler();
 
-  assert.strictEqual(visibleRes.statusCode, 200);
-  assert.match(visibleRes.body, /"behavior":"allow"/);
-  assert.strictEqual(collapsedRes.statusCode, null);
+  assert.strictEqual(activeRes.statusCode, 200);
+  assert.match(activeRes.body, /"behavior":"allow"/);
+  assert.strictEqual(queuedRes.statusCode, null);
   assert.strictEqual(permission.pendingPermissions.length, 1);
 });
 
-test("pet visible: a pending entry without a bubble window still registers hotkeys", () => {
+test("pet visible: a pending entry not yet presented does not register hotkeys", () => {
   const { permission, globalShortcut } = loadPermission();
   pushPending(permission, { bubble: null });
   permission.syncPermissionShortcuts();
 
-  assert.ok(globalShortcut.registered.has(ALLOW_ACCEL));
-  assert.ok(globalShortcut.registered.has(DENY_ACCEL));
+  assert.strictEqual(globalShortcut.registered.size, 0);
 });

@@ -110,6 +110,20 @@ body { padding: 6px; }
   min-width: 0;
   margin-bottom: 0;
 }
+.header-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+}
+.queue-count {
+  flex: none;
+  color: var(--cmd-color);
+  font-family: "SF Mono", "ui-monospace", "Cascadia Code", monospace;
+  font-size: 11px;
+  opacity: 0.75;
+}
 .header-title {
   font-size: 13px;
   font-weight: 600;
@@ -128,6 +142,35 @@ body { padding: 6px; }
   color: var(--irreversible-color);
   background: var(--irreversible-bg);
   border: 1px solid var(--irreversible-border);
+}
+
+.risk-coverage-note {
+  margin: 0 2px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--irreversible-border);
+  color: var(--cmd-color);
+  font-size: 11px;
+  line-height: 1.35;
+  user-select: text;
+}
+
+.active-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+.active-detail::-webkit-scrollbar,
+.queue-drawer::-webkit-scrollbar { width: 6px; }
+.active-detail::-webkit-scrollbar-track,
+.queue-drawer::-webkit-scrollbar-track { background: transparent; }
+.active-detail::-webkit-scrollbar-thumb,
+.queue-drawer::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb);
+  border-radius: 3px;
 }
 
 /* ── Tool pill ── */
@@ -201,7 +244,7 @@ body { padding: 6px; }
   font-size: 12px;
   color: var(--cmd-color);
   line-height: 1.5;
-  max-height: 80px;
+  max-height: 240px;
   overflow-y: auto;
   word-break: break-all;
   box-shadow: var(--cmd-shadow);
@@ -487,6 +530,109 @@ body { padding: 6px; }
   font-size: 11px;
   line-height: 1.35;
   padding: 2px 4px;
+}
+
+/* ── Shared permission queue ── */
+.permission-queue {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid var(--card-border);
+  min-height: 0;
+}
+.queue-heading {
+  color: var(--cmd-color);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.queue-preview,
+.queue-drawer {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.queue-drawer {
+  display: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 2px;
+}
+.queue-drawer.visible { display: flex; }
+.queue-row {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 9px;
+  color: var(--text-primary);
+  background: var(--sug-bg);
+  border: 1px solid var(--sug-border);
+  border-radius: 8px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+.queue-row:hover:not(:disabled),
+.queue-row:focus-visible:not(:disabled) {
+  background: var(--sug-hover-bg);
+  border-color: var(--sug-hover-border);
+}
+.queue-row:disabled { cursor: not-allowed; opacity: 0.58; }
+.queue-row-top {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.queue-row-tool {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--header-color);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-row-session {
+  margin-left: auto;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--cmd-color);
+  font-family: "SF Mono", "ui-monospace", "Cascadia Code", monospace;
+  font-size: 10px;
+  opacity: 0.75;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-row-summary {
+  overflow: hidden;
+  color: var(--cmd-color);
+  font-size: 11px;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.queue-more {
+  padding: 3px 2px;
+  color: #d97757;
+  background: transparent;
+  border: 0;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+}
+.queue-more:focus-visible { outline: 2px solid #d97757; outline-offset: 2px; }
+.queue-lock-hint {
+  color: var(--cmd-color);
+  font-size: 10px;
+  line-height: 1.3;
+  opacity: 0.8;
 }
 
 /* ── Plan feedback form ── */

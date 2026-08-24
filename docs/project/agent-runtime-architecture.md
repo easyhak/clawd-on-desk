@@ -323,8 +323,12 @@ CodeBuddy 的 PermissionRequest HTTP 所有权只认严格的本机 managed URL�
 - DeepSeek Harness 普通 approval 进入独立 blocking adapter；人工 Allow/Deny 可用，但 auto-tools、unattended 与 per-session grant 全部 DEFER。`ask_user_question` 返回 204 交给 DSH 原生 provider
 - Codex 的 PermissionRequest 是 official command hook；hook 脚本挂起等待 `/permission`，再把 sanitized allow/deny JSON 写到 stdout
 - `POST /permission` 接收 `{ tool_name, tool_input, session_id, permission_suggestions }`；Codex 额外带 `turn_id`、`tool_input_description`、`tool_input_fingerprint`
-- 每个权限请求都会创建独立 `BrowserWindow`，多个 bubble 从右下向上堆叠
-- bubble 会通过 IPC `bubble-height` 回报真实高度，主进程据此重排
+- 本地权限 UI 是一个进程级共享 surface：只完整展示一个 active 请求，其他请求显示为可切换的等待摘要；当前 active 默认保持稳定，新的交互型请求可抢占被动通知，但不会自动打断另一个交互型请求
+- 共享 surface 正常只持有一个可见 `BrowserWindow`。普通审批与带文本输入的审批需要不同的创建期 native window mode；切换 mode 时先创建隐藏候选窗口，候选加载并回报高度后再原子替换旧窗口，失败则保留旧窗口与全部 pending 请求
+- renderer 的 `permission-show` envelope 同时携带 `surfaceRevision` 与 `activeContentRevision`：队列变化只递增前者，不能重置 active 输入或让仍然有效的审批按钮失效；决定与队列切换都校验 active identity/revision，过期操作只触发重绘恢复，不产生决定
+- bubble 通过 IPC `bubble-height` 回报真实高度、surface revision、active entry 和本次实际承载的 entry ids；主进程只在 ACK 与当前 surface 匹配后定位并显示窗口，Slack 通知也复用这次可见性确认
+- 问答、计划反馈和 elicitation 等有草稿状态的 active 请求会锁住队列切换，避免切换时静默丢失输入；普通 Allow/Deny 请求可从等待摘要切换，不会顺带决定原请求
+- 隐藏桌宠时用 entry ordinal 记录一次 cutoff：cutoff 前的 pending 请求从共享 surface 收起，隐藏期间新到的请求仍可显示；surface 崩溃只 no-decision 本次实际交给 renderer 的 entry ids，不能波及被 cutoff 隐藏或 remote-only 的请求
 - 支持 Allow / Deny / suggestion 决策，以及 `addRules` / `setMode` suggestion 类型
 - `permission-automation-policy.js` 的 off / auto-tools / unattended 与 `session-automation-coordinator.js` 的 per-session grant 会在 bubble 渲染前产生真实决定。auto-tools 对 Claude/Qwen 的未知 built-in（除有效 namespaced MCP）fail closed，但其他已知 adapter 对非空工具名不都使用逐工具 allowlist；unattended 在识别已知 decision tools 后仍有意对可作 Allow/Deny 的未知请求保留“handle every request”行为。新增 agent/tool/interaction 必须同时审查 policy 与 tests，不能笼统假设 unknown 一律 defer
 - Telegram 与飞书 / Lark 是和本地 bubble 并行的远程决策通道；关闭本地 bubble 不等于关闭远程审批。远程 client 超时、断连、未配置或启动失败不得产生决定或 deny：本地 bubble 存在时请求继续 pending；仅在 remote-only 且所有可用 client 都无决定时，整体请求才 no-decision 并让 agent 回原生 UI 重问

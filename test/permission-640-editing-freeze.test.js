@@ -8,8 +8,39 @@ const { describe, it } = require("node:test");
 // permission-ime-editing.test.js): handleImeEditing and friends resolve IPC
 // senders via BrowserWindow.fromWebContents, and the test runtime's
 // require("electron") returns a path string.
+class FakePermissionWindow {
+  constructor() {
+    this.destroyed = false;
+    this.visible = false;
+    this.listeners = new Map();
+    this.sentEvents = [];
+    this.setBoundsCalls = [];
+    this.webContents = {
+      once: (name, listener) => this.listeners.set(name, listener),
+      on: (name, listener) => this.listeners.set(name, listener),
+      send: (...args) => this.sentEvents.push(args),
+      isDestroyed: () => this.destroyed,
+    };
+  }
+  static fromWebContents(sender) { return sender && sender.__win ? sender.__win : null; }
+  setAlwaysOnTop() {}
+  setBounds(bounds) { this.bounds = bounds; this.setBoundsCalls.push(bounds); }
+  getBounds() { return this.bounds || { x: 0, y: 0, width: 420, height: 240 }; }
+  setSkipTaskbar() {}
+  showInactive() { this.visible = true; }
+  hide() { this.visible = false; }
+  isVisible() { return this.visible; }
+  isDestroyed() { return this.destroyed; }
+  on(name, listener) { this.listeners.set(name, listener); }
+  loadFile() { this.listeners.get("did-finish-load")?.(); }
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.listeners.get("closed")?.();
+  }
+}
 const __electronMock = {
-  BrowserWindow: { fromWebContents: (sender) => (sender && sender.__win) || null },
+  BrowserWindow: FakePermissionWindow,
   globalShortcut: {
     register: () => {}, unregister: () => {}, unregisterAll: () => {}, isRegistered: () => false,
   },
@@ -61,40 +92,55 @@ function makeBubble(overrides = {}) {
   };
 }
 
+function presentPermission(api) {
+  const entry = {
+    res: null,
+    suggestions: [],
+    sessionId: "ime-session",
+    toolName: "AskUserQuestion",
+    toolInput: { questions: [{ question: "Choose", options: [] }] },
+    agentId: "claude-code",
+    isElicitation: true,
+    createdAt: Date.now(),
+  };
+  api.addPendingPermission(entry, "test-present");
+  api.showPermissionBubble(entry);
+  const surface = api.getPermissionSurfaceWindow();
+  const envelope = [...surface.sentEvents].reverse().find(([name]) => name === "permission-show")[1];
+  api.handleBubbleHeight({ sender: { __win: surface } }, {
+    height: 240,
+    surfaceRevision: envelope.surfaceRevision,
+    activeEntryId: envelope.activeEntryId,
+    entryIds: envelope.entryIds,
+  });
+  surface.setBoundsCalls.length = 0;
+  return surface;
+}
+
 describe("repositionBubbles freeze while editing (#640)", () => {
-  it("skips the bubble being typed into and still places the others", () => {
+  it("keeps the shared surface fixed while its active input is being edited", () => {
     const ctx = makeCtx();
-    const { repositionBubbles, pendingPermissions } = initPermission(ctx);
-
-    const frozen = makeBubble();
+    const api = initPermission(ctx);
+    const frozen = presentPermission(api);
     frozen.__clawdMacImeEditing = true;
-    const normal = makeBubble();
-    pendingPermissions.push(
-      { bubble: frozen, suggestions: [], measuredHeight: 120 },
-      { bubble: normal, suggestions: [], measuredHeight: 120 },
-    );
 
-    repositionBubbles();
+    api.repositionBubbles();
 
     assert.strictEqual(frozen.setBoundsCalls.length, 0,
-      "the editing bubble must hold its position");
-    assert.strictEqual(normal.setBoundsCalls.length, 1,
-      "non-editing bubbles still get placed");
+      "the editing shared surface must hold its position");
   });
 
-  it("places every bubble again once editing ends", () => {
+  it("places the shared surface again once editing ends", () => {
     const ctx = makeCtx();
-    const { repositionBubbles, pendingPermissions } = initPermission(ctx);
-
-    const bubble = makeBubble();
+    const api = initPermission(ctx);
+    const bubble = presentPermission(api);
     bubble.__clawdMacImeEditing = true;
-    pendingPermissions.push({ bubble, suggestions: [], measuredHeight: 120 });
 
-    repositionBubbles();
+    api.repositionBubbles();
     assert.strictEqual(bubble.setBoundsCalls.length, 0);
 
     delete bubble.__clawdMacImeEditing;
-    repositionBubbles();
+    api.repositionBubbles();
     assert.strictEqual(bubble.setBoundsCalls.length, 1);
   });
 });

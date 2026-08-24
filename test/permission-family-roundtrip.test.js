@@ -32,10 +32,38 @@ function loadPermissionWithElectron(fakeElectron) {
 }
 
 function makeHarness() {
+  class FakeBrowserWindow {
+    constructor() {
+      this.destroyed = false;
+      this.visible = false;
+      this.listeners = new Map();
+      this.sentEvents = [];
+      this.webContents = {
+        once: (name, listener) => this.listeners.set(name, listener),
+        on: (name, listener) => this.listeners.set(name, listener),
+        send: (...args) => this.sentEvents.push(args),
+        isDestroyed: () => this.destroyed,
+      };
+    }
+    static fromWebContents(sender) { return sender && sender.__window ? sender.__window : null; }
+    setAlwaysOnTop() {}
+    setBounds(bounds) { this.bounds = bounds; }
+    getBounds() { return this.bounds || { x: 0, y: 0, width: 420, height: 240 }; }
+    setSkipTaskbar() {}
+    showInactive() { this.visible = true; }
+    hide() { this.visible = false; }
+    isVisible() { return this.visible; }
+    isDestroyed() { return this.destroyed; }
+    on(name, listener) { this.listeners.set(name, listener); }
+    loadFile() { this.listeners.get("did-finish-load")?.(); }
+    destroy() {
+      if (this.destroyed) return;
+      this.destroyed = true;
+      this.listeners.get("closed")?.();
+    }
+  }
   const fakeElectron = {
-    BrowserWindow: Object.assign(class {}, {
-      fromWebContents(sender) { return sender && sender.__window ? sender.__window : null; },
-    }),
+    BrowserWindow: FakeBrowserWindow,
     globalShortcut: {
       register() { return true; },
       unregister() {},
@@ -47,15 +75,38 @@ function makeHarness() {
     sessions: new Map(),
     hideBubbles: false,
     petHidden: false,
-    win: null,
+    win: { isDestroyed: () => false },
     lang: "en",
     getBubblePolicy: () => ({ enabled: true, autoCloseMs: null }),
     focusTerminalForSession: () => {},
     getSettingsSnapshot: () => ({}),
     isAgentPermissionsEnabled: () => true,
+    subscribeShortcuts: () => () => {},
+    clearShortcutFailure() {},
+    reportShortcutFailure() {},
+    getPetWindowBounds: () => ({ x: 0, y: 0, width: 128, height: 128 }),
+    getNearestWorkArea: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+    getHitRectScreen: () => null,
+    getHudReservedOffset: () => 0,
+    guardAlwaysOnTop() {},
+    reapplyMacVisibility() {},
+    repositionUpdateBubble() {},
     permDebugLog: null,
   });
-  return { api };
+  function present(entry) {
+    api.addPendingPermission(entry, "test-present");
+    api.showPermissionBubble(entry);
+    const surface = api.getPermissionSurfaceWindow();
+    const envelope = [...surface.sentEvents].reverse().find(([name]) => name === "permission-show")[1];
+    api.handleBubbleHeight({ sender: { __window: surface } }, {
+      height: 240,
+      surfaceRevision: envelope.surfaceRevision,
+      activeEntryId: envelope.activeEntryId,
+      entryIds: envelope.entryIds,
+    });
+    return { sender: { __window: surface } };
+  }
+  return { api, present };
 }
 
 // A real localhost listener standing in for the plugin's reverse bridge.
@@ -139,12 +190,10 @@ describe("opencode-family bridge round-trips", () => {
   it("Always Allow: handleDecide('family-always') reaches the bridge as reply='always'", async () => {
     const bridge = await startBridge();
     try {
-      const { api } = makeHarness();
-      const fakeWin = makeFakeBubble();
-      const entry = makeFamilyEntry(bridge, { bubble: fakeWin });
-      api.pendingPermissions.push(entry);
+      const { api, present } = makeHarness();
+      const entry = makeFamilyEntry(bridge);
 
-      api.handleDecide({ sender: { __window: fakeWin } }, "family-always");
+      api.handleDecide(present(entry), "family-always");
 
       await bridge.firstRequest();
       assert.strictEqual(bridge.requests.length, 1);
@@ -161,12 +210,10 @@ describe("opencode-family bridge round-trips", () => {
   it("Deny: handleDecide('deny') reaches the bridge as reply='reject'", async () => {
     const bridge = await startBridge();
     try {
-      const { api } = makeHarness();
-      const fakeWin = makeFakeBubble();
-      const entry = makeFamilyEntry(bridge, { bubble: fakeWin });
-      api.pendingPermissions.push(entry);
+      const { api, present } = makeHarness();
+      const entry = makeFamilyEntry(bridge);
 
-      api.handleDecide({ sender: { __window: fakeWin } }, "deny");
+      api.handleDecide(present(entry), "deny");
 
       await bridge.firstRequest();
       assert.deepStrictEqual(bridge.requests[0].body, { request_id: "per_rt_1", reply: "reject" });
@@ -178,12 +225,10 @@ describe("opencode-family bridge round-trips", () => {
   it("Allow without the Always pick degrades to reply='once'", async () => {
     const bridge = await startBridge();
     try {
-      const { api } = makeHarness();
-      const fakeWin = makeFakeBubble();
-      const entry = makeFamilyEntry(bridge, { bubble: fakeWin });
-      api.pendingPermissions.push(entry);
+      const { api, present } = makeHarness();
+      const entry = makeFamilyEntry(bridge);
 
-      api.handleDecide({ sender: { __window: fakeWin } }, "allow");
+      api.handleDecide(present(entry), "allow");
 
       await bridge.firstRequest();
       assert.deepStrictEqual(bridge.requests[0].body, { request_id: "per_rt_1", reply: "once" });

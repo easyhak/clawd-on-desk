@@ -7,6 +7,37 @@ const { classifyPermissionInteraction } = require("../src/permission-automation-
 
 const PERMISSION_MODULE_PATH = require.resolve("../src/permission");
 
+class FakePermissionWindow {
+  constructor() {
+    this.destroyed = false;
+    this.visible = false;
+    this.listeners = new Map();
+    this.sentEvents = [];
+    this.webContents = {
+      once: (name, listener) => this.listeners.set(name, listener),
+      on: (name, listener) => this.listeners.set(name, listener),
+      send: (...args) => this.sentEvents.push(args),
+      isDestroyed: () => this.destroyed,
+    };
+  }
+  static fromWebContents(sender) { return sender && sender.__window ? sender.__window : null; }
+  setAlwaysOnTop() {}
+  setBounds(bounds) { this.bounds = bounds; }
+  getBounds() { return this.bounds || { x: 0, y: 0, width: 420, height: 240 }; }
+  setSkipTaskbar() {}
+  showInactive() { this.visible = true; }
+  hide() { this.visible = false; }
+  isVisible() { return this.visible; }
+  isDestroyed() { return this.destroyed; }
+  on(name, listener) { this.listeners.set(name, listener); }
+  loadFile() { this.listeners.get("did-finish-load")?.(); }
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.listeners.get("closed")?.();
+  }
+}
+
 function loadPermissionWithMocks({ electron, childProcess, platform = "darwin" }) {
   delete require.cache[PERMISSION_MODULE_PATH];
   const originalLoad = Module._load;
@@ -81,7 +112,7 @@ function createContext(focusCalls) {
     getSettingsSnapshot: () => ({ shortcuts: {} }),
     subscribeShortcuts: () => () => {},
     getBubblePolicy: () => ({ enabled: true, autoCloseMs: null }),
-    getPetWindowBounds: () => null,
+    getPetWindowBounds: () => ({ x: 0, y: 0, width: 128, height: 128 }),
     getNearestWorkArea: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
     getHitRectScreen: () => null,
     getHudReservedOffset: () => 0,
@@ -91,13 +122,26 @@ function createContext(focusCalls) {
     clearShortcutFailure: () => {},
     reportShortcutFailure: () => {},
     permDebugLog: null,
-    win: null,
+    win: { isDestroyed: () => false },
     bubbleFollowPet: false,
     petHidden: false,
     doNotDisturb: false,
     hideBubbles: false,
     sessions: new Map(),
   };
+}
+
+function presentPermission(permission, entry) {
+  permission.addPendingPermission(entry, "test-present");
+  permission.showPermissionBubble(entry);
+  const surface = permission.getPermissionSurfaceWindow();
+  const envelope = [...surface.sentEvents].reverse().find(([name]) => name === "permission-show")[1];
+  permission.handleBubbleHeight({ sender: { __window: surface } }, {
+    height: 240,
+    surfaceRevision: envelope.surfaceRevision,
+    activeEntryId: envelope.activeEntryId,
+    entryIds: envelope.entryIds,
+  });
 }
 
 afterEach(() => {
@@ -113,7 +157,7 @@ async function assertHotkeyLeavesFocusUntouchedOnCaptureFailure({ accelerator, e
   const globalShortcut = createGlobalShortcut();
   const initPermission = loadPermissionWithMocks({
     electron: {
-      BrowserWindow: Object.assign(class {}, { fromWebContents() { return null; } }),
+      BrowserWindow: FakePermissionWindow,
       globalShortcut,
     },
     childProcess: {
@@ -126,7 +170,7 @@ async function assertHotkeyLeavesFocusUntouchedOnCaptureFailure({ accelerator, e
   const permission = initPermission(createContext(focusCalls));
   const res = createResponse();
 
-  permission.pendingPermissions.push({
+  const entry = {
     res,
     abortHandler: () => {},
     suggestions: [],
@@ -139,8 +183,8 @@ async function assertHotkeyLeavesFocusUntouchedOnCaptureFailure({ accelerator, e
     interaction: classifyPermissionInteraction({ agentId: "claude-code", toolName: "Bash" }),
     resolvedSuggestion: null,
     createdAt: Date.now() - 5000,
-  });
-  permission.syncPermissionShortcuts();
+  };
+  presentPermission(permission, entry);
 
   const handler = globalShortcut.registered.get(accelerator);
   assert.strictEqual(typeof handler, "function");
@@ -176,13 +220,13 @@ test("opencode unknown permissions keep the global Allow/Deny shortcuts", () => 
   const globalShortcut = createGlobalShortcut();
   const initPermission = loadPermissionWithMocks({
     electron: {
-      BrowserWindow: Object.assign(class {}, { fromWebContents() { return null; } }),
+      BrowserWindow: FakePermissionWindow,
       globalShortcut,
     },
     childProcess: { execFile() {} },
   });
   const permission = initPermission(createContext([]));
-  permission.pendingPermissions.push({
+  const entry = {
     res: createResponse(),
     abortHandler: () => {},
     suggestions: [],
@@ -199,9 +243,8 @@ test("opencode unknown permissions keep the global Allow/Deny shortcuts", () => 
     }),
     resolvedSuggestion: null,
     createdAt: Date.now() - 5000,
-  });
-
-  permission.syncPermissionShortcuts();
+  };
+  presentPermission(permission, entry);
 
   assert.strictEqual(
     typeof globalShortcut.registered.get("CommandOrControl+Shift+Y"),

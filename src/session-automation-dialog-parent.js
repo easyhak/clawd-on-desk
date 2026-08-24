@@ -9,9 +9,18 @@ function usableWindow(candidate) {
   }
 }
 
-function selectSessionAutomationDialogParent({ entry, petWindow } = {}) {
-  const bubble = entry && entry.bubble;
-  if (usableWindow(bubble)) return bubble;
+function selectSessionAutomationDialogParent({ entry, permissionSurfaceWindow, petWindow } = {}) {
+  if (usableWindow(permissionSurfaceWindow)) {
+    try {
+      if (typeof permissionSurfaceWindow.isVisible !== "function" || permissionSurfaceWindow.isVisible()) {
+        return permissionSurfaceWindow;
+      }
+    } catch {}
+  }
+  // Compatibility for callers outside the shared-surface runtime. Production
+  // passes permissionSurfaceWindow and no longer assigns entry.bubble.
+  const legacyBubble = entry && entry.bubble;
+  if (usableWindow(legacyBubble)) return legacyBubble;
 
   // Dashboard requests carry the BrowserWindow resolved from the invoking
   // webContents. Parenting the native warning to the always-on-top pet leaves

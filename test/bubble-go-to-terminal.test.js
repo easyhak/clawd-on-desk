@@ -73,9 +73,10 @@ class FakeElement {
 function createHarness() {
   const elements = new Map();
   for (const id of [
-    "card", "toolPill", "toolPillText", "commandBlock", "irreversibleBadge",
+    "card", "activeDetail", "toolPill", "toolPillText", "commandBlock", "irreversibleBadge", "riskCoverageNote",
     "elicitationForm", "elicitationProgress", "planFeedbackForm", "planFeedbackTextarea",
     "planFeedbackBack", "planFeedbackSubmit", "btnAllow", "btnDeny", "suggestions", "sessionTag",
+    "queueCount", "permissionQueue", "queueHeading", "queuePreview", "queueMore", "queueDrawer", "queueLockHint",
   ]) elements.set(id, new FakeElement(id.includes("Textarea") ? "textarea" : "div"));
   elements.set("btnAllow", new FakeElement("button"));
   elements.set("btnDeny", new FakeElement("button"));
@@ -94,6 +95,7 @@ function createHarness() {
   };
   const bubbleAPI = {
     decide: (decision) => decisions.push(decision),
+    select() {},
     reportHeight() {},
     onPermissionShow: (callback) => { showPermission = callback; },
     onPermissionHide() {},

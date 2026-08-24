@@ -39,7 +39,9 @@ class FakeBrowserWindow {
   setAlwaysOnTop() {}
   setBounds(bounds) { this.bounds = bounds; }
   setSkipTaskbar() {}
-  showInactive() {}
+  showInactive() { this.visible = true; }
+  hide() { this.visible = false; }
+  isVisible() { return this.visible === true; }
   focus() {}
   on(event, callback) { this.listeners.set(event, callback); }
   isDestroyed() { return this.destroyed; }
@@ -170,8 +172,10 @@ function makePermEntry(overrides = {}) {
 
 function renderAndAcknowledge(perm, entry, height = 180) {
   perm.showPermissionBubble(entry);
-  assert.ok(entry.bubble, "precondition: a desktop bubble was constructed");
-  perm.handleBubbleHeight({ sender: { __window: entry.bubble } }, height);
+  const surface = perm.getPermissionSurfaceWindow();
+  assert.ok(surface, "precondition: a desktop permission surface was constructed");
+  perm.handleBubbleHeight({ sender: { __window: surface } }, height);
+  return surface;
 }
 
 describe("slack permission announce: only for requests a human must answer", () => {
@@ -191,7 +195,8 @@ describe("slack permission announce: only for requests a human must answer", () 
     perm.showPermissionBubble(entry);
     assert.deepEqual(ctx.announced, [], "loading a BrowserWindow is not yet a rendered card");
 
-    perm.handleBubbleHeight({ sender: { __window: entry.bubble } }, 180);
+    const surface = perm.getPermissionSurfaceWindow();
+    perm.handleBubbleHeight({ sender: { __window: surface } }, 180);
     assert.equal(ctx.announced.length, 1);
     assert.equal(typeof ctx.announceOptions[0].isStillRelevant, "function");
     assert.equal(ctx.announceOptions[0].isStillRelevant(), true);
@@ -200,7 +205,7 @@ describe("slack permission announce: only for requests a human must answer", () 
     assert.equal(ctx.announced[0].agentId, "claude-code");
 
     // Renderer reflows (stepper/feedback/text-size) must not ping Slack twice.
-    perm.handleBubbleHeight({ sender: { __window: entry.bubble } }, 220);
+    perm.handleBubbleHeight({ sender: { __window: surface } }, 220);
     assert.equal(ctx.announced.length, 1);
   });
 
@@ -215,7 +220,7 @@ describe("slack permission announce: only for requests a human must answer", () 
     ctx.getNearestWorkArea = () => { throw new Error("display disappeared"); };
 
     assert.throws(
-      () => perm.handleBubbleHeight({ sender: { __window: entry.bubble } }, 180),
+      () => perm.handleBubbleHeight({ sender: { __window: perm.getPermissionSurfaceWindow() } }, 180),
       /display disappeared/
     );
     assert.equal(ctx.announced.length, 1,
@@ -331,8 +336,9 @@ describe("slack permission announce: only for requests a human must answer", () 
     const resolvedEntry = makePermEntry();
     resolvedPerm.addPendingPermission(resolvedEntry, "added");
     resolvedPerm.showPermissionBubble(resolvedEntry);
+    const resolvedSurface = resolvedPerm.getPermissionSurfaceWindow();
     resolvedPerm.removePendingPermission(resolvedEntry, "resolved-before-render");
-    resolvedPerm.handleBubbleHeight({ sender: { __window: resolvedEntry.bubble } }, 180);
+    resolvedPerm.handleBubbleHeight({ sender: { __window: resolvedSurface } }, 180);
     assert.deepEqual(resolvedCtx.announced, []);
 
     const dndCtx = makeCtx();
@@ -341,7 +347,7 @@ describe("slack permission announce: only for requests a human must answer", () 
     dndPerm.addPendingPermission(dndEntry, "added");
     dndPerm.showPermissionBubble(dndEntry);
     dndCtx.doNotDisturb = true;
-    dndPerm.handleBubbleHeight({ sender: { __window: dndEntry.bubble } }, 180);
+    dndPerm.handleBubbleHeight({ sender: { __window: dndPerm.getPermissionSurfaceWindow() } }, 180);
     assert.deepEqual(dndCtx.announced, []);
   });
 

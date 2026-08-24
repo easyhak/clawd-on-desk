@@ -107,4 +107,39 @@ describe("floating-window-runtime", () => {
       ["hideUpdate"],
     ]);
   });
+
+  it("records the shared-surface cutoff before hiding its window", () => {
+    const calls = [];
+    const shared = makeWindow("shared", calls);
+    const runtime = createFloatingWindowRuntime({
+      getPermissionBubbleWindows: () => [shared],
+      setPermissionPetHidden: (hidden) => calls.push(["petHidden", hidden]),
+      hideUpdateBubble: () => calls.push(["hideUpdate"]),
+    });
+
+    runtime.hideFloatingSurfacesForPet();
+
+    assert.deepStrictEqual(calls, [
+      ["petHidden", true],
+      ["hide", "shared"],
+      ["hideUpdate"],
+    ]);
+  });
+
+  it("lets the permission runtime republish before syncing the update bubble", () => {
+    const calls = [];
+    const shared = makeWindow("shared", calls);
+    const runtime = createFloatingWindowRuntime({
+      getPermissionBubbleWindows: () => [shared],
+      setPermissionPetHidden: (hidden) => calls.push(["petHidden", hidden]),
+      syncUpdateBubbleVisibility: () => calls.push(["syncUpdate"]),
+    });
+
+    runtime.showFloatingSurfacesForPet();
+
+    assert.deepStrictEqual(calls, [
+      ["petHidden", false],
+      ["syncUpdate"],
+    ]);
+  });
 });

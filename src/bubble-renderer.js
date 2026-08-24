@@ -1,5 +1,12 @@
-const { formatDetail, truncate, parseMcpToolName, detectIrreversible } = window.ClawdBubbleFormat;
+const {
+  formatDetail,
+  truncate,
+  parseMcpToolName,
+  detectIrreversible,
+  isIrreversibleScanPartial,
+} = window.ClawdBubbleFormat;
 const card = document.getElementById("card");
+const activeDetail = document.getElementById("activeDetail");
 const toolPill = document.getElementById("toolPill");
 const toolPillText = document.getElementById("toolPillText");
 function stopMarquee() {
@@ -16,6 +23,7 @@ toolPill.addEventListener("mouseenter", startMarqueeIfOverflowing);
 toolPill.addEventListener("mouseleave", stopMarquee);
 const commandBlock = document.getElementById("commandBlock");
 const irreversibleBadge = document.getElementById("irreversibleBadge");
+const riskCoverageNote = document.getElementById("riskCoverageNote");
 const elicitationForm = document.getElementById("elicitationForm");
 const elicitationProgress = document.getElementById("elicitationProgress");
 const planFeedbackForm = document.getElementById("planFeedbackForm");
@@ -27,6 +35,13 @@ const btnDeny = document.getElementById("btnDeny");
 const suggestionsContainer = document.getElementById("suggestions");
 const headerTitle = document.querySelector(".header-title");
 const sessionTag = document.getElementById("sessionTag");
+const queueCount = document.getElementById("queueCount");
+const permissionQueue = document.getElementById("permissionQueue");
+const queueHeading = document.getElementById("queueHeading");
+const queuePreview = document.getElementById("queuePreview");
+const queueMore = document.getElementById("queueMore");
+const queueDrawer = document.getElementById("queueDrawer");
+const queueLockHint = document.getElementById("queueLockHint");
 let elicitationMode = false;
 let codexUserInputMode = false;
 let elicitationQuestions = [];
@@ -34,11 +49,15 @@ let elicitationAnswers = {};
 let activeQuestionIndex = 0;
 let currentLang = "en";
 let heightReportFrame = 0;
+let currentSurfaceEnvelope = null;
+let queueDrawerOpen = false;
 
 // Mirrors body { padding: 6px; } above. Keep this in sync if the body padding changes.
 const BUBBLE_BODY_PADDING_Y = 12;
 const MIN_ELICITATION_FORM_HEIGHT = 80;
 const ELICITATION_OTHER_KEY = "__other__";
+const ACTIVE_DETAIL_MAX_LENGTH = 64 * 1024;
+const ACTIVE_DETAIL_FALLBACK_MAX_LENGTH = 4 * 1024;
 
 function setSessionTag(data) {
   const parts = [];
@@ -98,6 +117,10 @@ const BUBBLE_STRINGS = {
     planFeedbackPlaceholder: "What should be changed?",
     submitFeedback: "Send",
     back: "Back",
+    waitingRequests: "Waiting",
+    moreRequests: "View all {count}",
+    finishCurrentInput: "Finish the current input before switching.",
+    riskScanPartial: "Safety hints only scan the first 4 KB; review the remaining command carefully.",
   },
   zh: {
     irreversibleHint: "\u7834\u574F\u6027\u64CD\u4F5C\u2014\u2014\u53EF\u80FD\u65E0\u6CD5\u6062\u590D",
@@ -141,6 +164,10 @@ const BUBBLE_STRINGS = {
     planFeedbackPlaceholder: "\u54EA\u91CC\u9700\u8981\u6539?",
     submitFeedback: "\u53D1\u9001",
     back: "\u8FD4\u56DE",
+    waitingRequests: "\u7B49\u5F85\u5904\u7406",
+    moreRequests: "\u67E5\u770B\u5168\u90E8 {count} \u4E2A",
+    finishCurrentInput: "\u8BF7\u5148\u5B8C\u6210\u5F53\u524D\u8F93\u5165\uFF0C\u518D\u5207\u6362\u8BF7\u6C42\u3002",
+    riskScanPartial: "\u5B89\u5168\u63D0\u793A\u4EC5\u626B\u63CF\u547D\u4EE4\u524D 4 KB\uFF0C\u8BF7\u4ED4\u7EC6\u68C0\u67E5\u540E\u7EED\u5185\u5BB9\u3002",
   },
   "zh-TW": {
     irreversibleHint: "\u7834\u58DE\u6027\u64CD\u4F5C\u2014\u2014\u53EF\u80FD\u7121\u6CD5\u5FA9\u539F",
@@ -184,6 +211,10 @@ const BUBBLE_STRINGS = {
     planFeedbackPlaceholder: "哪裡需要改?",
     submitFeedback: "傳送",
     back: "返回",
+    waitingRequests: "等待處理",
+    moreRequests: "查看全部 {count} 個",
+    finishCurrentInput: "請先完成目前輸入，再切換請求。",
+    riskScanPartial: "安全提示只掃描命令前 4 KB，請仔細檢查後續內容。",
   },
   ko: {
     irreversibleHint: "\uD30C\uAD34\uC801 \uC791\uC5C5 \u2014 \uBCF5\uAD6C\uB418\uC9C0 \uC54A\uC744 \uC218 \uC788\uC2B5\uB2C8\uB2E4",
@@ -227,6 +258,10 @@ const BUBBLE_STRINGS = {
     planFeedbackPlaceholder: "\uC5B4\uB514\uB97C \uBC14\uAFD4\uC57C \uD558\uB098\uC694?",
     submitFeedback: "\uBCF4\uB0B4\uAE30",
     back: "\uB4A4\uB85C",
+    waitingRequests: "\uB300\uAE30 \uC911",
+    moreRequests: "\uC694\uCCAD {count}\uAC1C \uBAA8\uB450 \uBCF4\uAE30",
+    finishCurrentInput: "\uC694\uCCAD\uC744 \uC804\uD658\uD558\uAE30 \uC804\uC5D0 \uD604\uC7AC \uC785\uB825\uC744 \uB9C8\uBB34\uB9AC\uD558\uC138\uC694.",
+    riskScanPartial: "\uC548\uC804 \uC54C\uB9BC\uC740 \uBA85\uB839\uC758 \uCC98\uC74C 4KB\uB9CC \uAC80\uC0AC\uD569\uB2C8\uB2E4. \uB098\uBA38\uC9C0 \uB0B4\uC6A9\uC744 \uC8FC\uC758 \uAE4A\uAC8C \uD655\uC778\uD558\uC138\uC694.",
   },
   ja: {
     irreversibleHint: "\u7834\u58CA\u7684\u306A\u64CD\u4F5C \u2014 \u5FA9\u5143\u3067\u304D\u306A\u3044\u53EF\u80FD\u6027\u304C\u3042\u308A\u307E\u3059",
@@ -270,6 +305,10 @@ const BUBBLE_STRINGS = {
     planFeedbackPlaceholder: "どこを変更すべき?",
     submitFeedback: "送信",
     back: "戻る",
+    waitingRequests: "待機中",
+    moreRequests: "{count} 件すべて表示",
+    finishCurrentInput: "現在の入力を完了してからリクエストを切り替えてください。",
+    riskScanPartial: "安全性のヒントはコマンドの先頭 4 KB だけを確認します。残りの内容も注意して確認してください。",
   },
   "pt-BR": {
     irreversibleHint: "Ação destrutiva — pode não ter volta",
@@ -313,6 +352,10 @@ const BUBBLE_STRINGS = {
     planFeedbackPlaceholder: "O que deveria mudar?",
     submitFeedback: "Enviar",
     back: "Voltar",
+    waitingRequests: "Aguardando",
+    moreRequests: "Ver todas as {count}",
+    finishCurrentInput: "Conclua a entrada atual antes de trocar de pedido.",
+    riskScanPartial: "Os alertas de segurança verificam apenas os primeiros 4 KB; revise com cuidado o restante do comando.",
   },
   es: {
     irreversibleHint: "Acción destructiva — puede ser irreversible",
@@ -356,6 +399,10 @@ const BUBBLE_STRINGS = {
     planFeedbackPlaceholder: "¿Qué habría que cambiar?",
     submitFeedback: "Enviar",
     back: "Atrás",
+    waitingRequests: "En espera",
+    moreRequests: "Ver las {count}",
+    finishCurrentInput: "Termina la entrada actual antes de cambiar de solicitud.",
+    riskScanPartial: "Los avisos de seguridad solo revisan los primeros 4 KB; comprueba con cuidado el resto del comando.",
   },
 };
 
@@ -370,6 +417,32 @@ function bubbleText(lang, key, vars) {
     value = value.split(`{${name}}`).join(replacement);
   }
   return value;
+}
+
+function formatActiveDetail(toolName, toolInput, options = {}) {
+  return formatDetail(toolName, toolInput, {
+    ...options,
+    maxLength: ACTIVE_DETAIL_MAX_LENGTH,
+    fallbackMaxLength: ACTIVE_DETAIL_FALLBACK_MAX_LENGTH,
+  });
+}
+
+function renderRiskCoverage(toolName, toolInput, lang) {
+  const partial = typeof isIrreversibleScanPartial === "function"
+    && isIrreversibleScanPartial(toolName, toolInput);
+  riskCoverageNote.textContent = partial ? bubbleText(lang, "riskScanPartial") : "";
+  riskCoverageNote.style.display = partial ? "" : "none";
+}
+
+function applySurfaceMeasurementCeiling(envelope) {
+  const ceiling = Math.max(320, Math.floor(Number(envelope?.measureCeiling) || 1200));
+  // measureCeiling is two work-area heights in CSS pixels. Reserve the fixed
+  // header/actions/queue area from one work-area height; only detail + drawer
+  // become scroll containers when the window is clamped by main.
+  const workAreaCssHeight = Math.max(240, Math.floor(ceiling / 2));
+  activeDetail.style.maxHeight = `${Math.max(120, workAreaCssHeight - 250)}px`;
+  queueDrawer.style.maxHeight = `${Math.max(88, Math.min(180, Math.floor(workAreaCssHeight * 0.28)))}px`;
+  card.style.maxHeight = `${ceiling}px`;
 }
 
 function getSuggestionLabel(s, lang) {
@@ -476,20 +549,19 @@ function resetBubbleContent() {
   irreversibleBadge.style.display = "none";
   irreversibleBadge.textContent = "";
   irreversibleBadge.removeAttribute("data-reason");
+  riskCoverageNote.style.display = "none";
+  riskCoverageNote.textContent = "";
   elicitationForm.innerHTML = "";
   elicitationForm.style.maxHeight = "";
   elicitationForm.classList.remove("visible");
   elicitationProgress.textContent = "";
   elicitationProgress.classList.remove("visible");
-  // NOTE: this resets the feedback form's visibility + textarea value only, not
-  // the other side effects of enterPlanFeedbackMode() (suggestionsContainer
-  // display:none and the disabled flags on textarea/back/submit). That's safe
-  // today because every ExitPlanMode bubble is a fresh BrowserWindow/document —
-  // show() runs once per window so resetBubbleContent never has to undo a prior
-  // feedback session. If plan bubbles ever start reusing a window, restore those
-  // here too (suggestionsContainer.style.display + the disabled flags).
   planFeedbackForm.classList.remove("visible");
   planFeedbackTextarea.value = "";
+  planFeedbackTextarea.disabled = false;
+  planFeedbackBack.disabled = false;
+  planFeedbackSubmit.disabled = true;
+  suggestionsContainer.style.display = "";
   toolPill.style.display = "";
   stopMarquee();
   btnAllow.style.display = "";
@@ -497,6 +569,7 @@ function resetBubbleContent() {
   btnDeny.style.display = "";
   btnDeny.disabled = false;
   suggestionsContainer.innerHTML = "";
+  activeDetail.scrollTop = 0;
 }
 
 function getQuestionLabel(question, questionIndex) {
@@ -956,6 +1029,96 @@ function renderCodexUserInputPreview(data) {
   renderCodexUserInputStep(data);
 }
 
+function createQueueRow(item, switchingLocked) {
+  const row = document.createElement("button");
+  row.type = "button";
+  row.className = "queue-row";
+  row.setAttribute("data-entry-id", item.entryId || "");
+  row.setAttribute("aria-label", [item.toolLabel, item.sessionLabel, item.summary].filter(Boolean).join(" · "));
+  row.disabled = switchingLocked;
+
+  const top = document.createElement("span");
+  top.className = "queue-row-top";
+  const tool = document.createElement("span");
+  tool.className = "queue-row-tool";
+  tool.textContent = item.toolLabel || bubbleText(currentLang, "permissionRequest");
+  top.appendChild(tool);
+  if (item.sessionLabel) {
+    const session = document.createElement("span");
+    session.className = "queue-row-session";
+    session.textContent = item.sessionLabel;
+    top.appendChild(session);
+  }
+  const summary = document.createElement("span");
+  summary.className = "queue-row-summary";
+  summary.textContent = item.summary || "";
+  row.appendChild(top);
+  row.appendChild(summary);
+  row.addEventListener("click", () => {
+    if (switchingLocked || !item.entryId) return;
+    for (const button of permissionQueue.querySelectorAll("button")) button.disabled = true;
+    window.bubbleAPI.select(item.entryId);
+  });
+  return row;
+}
+
+function renderPermissionQueue(envelope) {
+  const queue = Array.isArray(envelope.queue) ? envelope.queue : [];
+  const total = Math.max(1, Number(envelope.totalCount) || queue.length + 1);
+  const activeIndex = Math.max(0, Number(envelope.activeIndex) || 0);
+  queueCount.textContent = total > 1 ? `${Math.min(total, activeIndex + 1)} / ${total}` : "";
+  permissionQueue.style.display = queue.length ? "" : "none";
+  queuePreview.innerHTML = "";
+  queueDrawer.innerHTML = "";
+  if (!queue.length) {
+    queueDrawerOpen = false;
+    queueMore.style.display = "none";
+    queueLockHint.textContent = "";
+    return;
+  }
+
+  queueHeading.textContent = bubbleText(currentLang, "waitingRequests");
+  queueLockHint.textContent = envelope.switchingLocked
+    ? bubbleText(currentLang, "finishCurrentInput")
+    : "";
+  queueLockHint.style.display = envelope.switchingLocked ? "" : "none";
+  for (const item of queue.slice(0, 2)) {
+    queuePreview.appendChild(createQueueRow(item, envelope.switchingLocked === true));
+  }
+  for (const item of queue) {
+    queueDrawer.appendChild(createQueueRow(item, envelope.switchingLocked === true));
+  }
+  const hasDrawer = queue.length > 2;
+  if (!hasDrawer) queueDrawerOpen = false;
+  queueMore.style.display = hasDrawer ? "" : "none";
+  queueMore.textContent = hasDrawer
+    ? bubbleText(currentLang, "moreRequests", { count: queue.length })
+    : "";
+  queueMore.setAttribute("aria-expanded", queueDrawerOpen ? "true" : "false");
+  queuePreview.style.display = queueDrawerOpen ? "none" : "";
+  queueDrawer.classList.toggle("visible", queueDrawerOpen);
+}
+
+queueMore.addEventListener("click", () => {
+  queueDrawerOpen = !queueDrawerOpen;
+  if (currentSurfaceEnvelope) renderPermissionQueue(currentSurfaceEnvelope);
+  scheduleBubbleHeightReport();
+});
+
+function restoreInteractionControls() {
+  for (const input of elicitationForm.querySelectorAll("input, textarea, button")) input.disabled = false;
+  for (const button of suggestionsContainer.querySelectorAll("button")) button.disabled = false;
+  if (elicitationMode) updateElicitationSubmitState();
+  else {
+    btnAllow.disabled = false;
+    btnDeny.disabled = false;
+  }
+  planFeedbackTextarea.disabled = false;
+  planFeedbackBack.disabled = false;
+  planFeedbackSubmit.disabled = !planFeedbackTextarea.value.trim();
+  if (currentSurfaceEnvelope) renderPermissionQueue(currentSurfaceEnvelope);
+}
+
 function show(data) {
   resetBubbleContent();
   currentLang = data.lang || "en";
@@ -969,6 +1132,7 @@ function show(data) {
   elicitationMode = interactionIntent === "human-question"
     && interactionCapabilities.answerQuestions === true;
   setSessionTag(data);
+  renderRiskCoverage(data.toolName, data.toolInput, data.lang);
 
   if (interactionIntent === "human-question" && !elicitationMode) {
     // The adapter identified a real user decision but cannot safely encode an
@@ -976,7 +1140,7 @@ function show(data) {
     // hand the request back to the agent's native UI.
     headerTitle.textContent = bubbleText(data.lang, "needsInput");
     toolPill.style.display = "none";
-    commandBlock.textContent = formatDetail(data.toolName, data.toolInput);
+    commandBlock.textContent = formatActiveDetail(data.toolName, data.toolInput);
     btnAllow.style.display = "none";
     btnDeny.style.display = "none";
     suggestionsContainer.innerHTML = "";
@@ -1019,7 +1183,7 @@ function show(data) {
     } else {
       try { detail = JSON.stringify(input); } catch { detail = "(n/a)"; }
     }
-    commandBlock.textContent = truncate(detail, 200);
+    commandBlock.textContent = truncate(detail, ACTIVE_DETAIL_MAX_LENGTH);
 
     btnAllow.textContent = bubbleText(data.lang, "allow");
     btnDeny.textContent = bubbleText(data.lang, "deny");
@@ -1086,7 +1250,10 @@ function show(data) {
     toolPillText.textContent = "CODEX";
     toolPill.setAttribute("data-tool", "CodexExec");
     toolPill.style.display = "";
-    commandBlock.textContent = (data.toolInput && data.toolInput.command) || "(unknown)";
+    commandBlock.textContent = truncate(
+      (data.toolInput && data.toolInput.command) || "(unknown)",
+      ACTIVE_DETAIL_MAX_LENGTH
+    );
     btnAllow.textContent = bubbleText(data.lang, "gotIt");
     btnAllow.disabled = false;
     btnDeny.style.display = "none";
@@ -1111,9 +1278,10 @@ function show(data) {
       toolPill.setAttribute("data-tool", kimiTool);
       // The fallbacks are defense-in-depth only: formatDetail's generic
       // last-resort loop returns non-empty for any server-normalized input.
-      commandBlock.textContent = formatDetail(kimiTool, kimiInput)
+      commandBlock.textContent = formatActiveDetail(kimiTool, kimiInput)
         || (data.toolInput && data.toolInput.command)
         || bubbleText(data.lang, "checkKimiTerminal");
+      renderRiskCoverage(kimiTool, kimiInput, data.lang);
       const kimiIrreversible = detectIrreversible(kimiTool, kimiInput);
       if (kimiIrreversible) {
         irreversibleBadge.textContent = "\u26A0 " + bubbleText(data.lang, "irreversibleHint");
@@ -1157,7 +1325,7 @@ function show(data) {
   toolPill.setAttribute("data-tool", data.toolName || "");
 
   // Command block (textContent only — never innerHTML)
-  commandBlock.textContent = formatDetail(data.toolName, data.toolInput, { isAntigravity: !!data.isAntigravity });
+  commandBlock.textContent = formatActiveDetail(data.toolName, data.toolInput, { isAntigravity: !!data.isAntigravity });
 
   // Irreversible-action hint — display-only (like the MCP relabel above): routes the
   // human's attention to destructive decisions. Allow/Deny semantics, the
@@ -1309,12 +1477,13 @@ document.addEventListener("keydown", (e) => {
   if (!elicitationMode) return;
   if (e.key !== "Enter" || e.shiftKey || e.isComposing) return;
   if (e.target && e.target.tagName === "TEXTAREA") return;
+  if (e.target && typeof e.target.closest === "function" && e.target.closest(".permission-queue")) return;
   if (btnAllow.disabled) return;
   e.preventDefault();
   btnAllow.click();
 });
 
-window.addEventListener("resize", applyElicitationViewport);
+window.addEventListener("resize", scheduleBubbleHeightReport);
 
 // ── Plan Feedback Mode ──
 
@@ -1418,5 +1587,31 @@ if (window.bubbleAPI && typeof window.bubbleAPI.setImeEditing === "function") {
   });
 }
 
-window.bubbleAPI.onPermissionShow(show);
+function handlePermissionSurfaceShow(envelope) {
+  // Legacy payload support keeps focused renderer tests and older preload
+  // fixtures useful while production always sends the surface envelope.
+  if (!envelope || typeof envelope !== "object" || !envelope.active) {
+    show(envelope || {});
+    return;
+  }
+  const previous = currentSurfaceEnvelope;
+  const activeChanged = !previous || previous.activeEntryId !== envelope.activeEntryId;
+  const activeContentChanged = !previous
+    || previous.activeContentRevision !== envelope.activeContentRevision;
+  currentSurfaceEnvelope = envelope;
+  currentLang = envelope.active.lang || "en";
+  applySurfaceMeasurementCeiling(envelope);
+
+  if (activeChanged) {
+    queueDrawerOpen = false;
+    show(envelope.active);
+  } else if (activeContentChanged && envelope.switchingLocked !== true) {
+    show(envelope.active);
+  }
+  renderPermissionQueue(envelope);
+  if (envelope.restoreInteractionControls === true) restoreInteractionControls();
+  scheduleBubbleHeightReport();
+}
+
+window.bubbleAPI.onPermissionShow(handlePermissionSurfaceShow);
 window.bubbleAPI.onPermissionHide(hide);

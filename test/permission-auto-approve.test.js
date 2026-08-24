@@ -129,22 +129,18 @@ describe("permission automation: showPermissionBubble chokepoint", () => {
     assert.equal(parsed.hookSpecificOutput.decision.behavior, "allow");
   });
 
-  it("does nothing special when the mode is off (would build a bubble)", () => {
-    // With auto-approve off and win=null, showPermissionBubble proceeds to
-    // BrowserWindow construction. We only assert the early-return did NOT
-    // fire by checking the entry stays pending up to the point of bubble
-    // creation throwing (no Electron in tests).
+  it("falls through to the human surface path when the mode is off", () => {
+    // This suite intentionally has no Electron BrowserWindow. Reaching the
+    // shared-surface path therefore ends in its no-decision fallback; the
+    // surfaceEligible marker proves automation did not consume the request.
     const ctx = makeCtx({ getPermissionAutomationMode: () => "off" });
     const perm = initPermission(ctx);
     const permEntry = makePermEntry();
     perm.pendingPermissions.push(permEntry);
 
-    assert.throws(() => perm.showPermissionBubble(permEntry));
-    assert.equal(
-      perm.pendingPermissions.indexOf(permEntry),
-      0,
-      "entry should still be pending (auto-approve did not consume it)"
-    );
+    assert.doesNotThrow(() => perm.showPermissionBubble(permEntry));
+    assert.equal(typeof permEntry.surfaceEntryId, "string");
+    assert.equal(perm.pendingPermissions.includes(permEntry), false);
   });
 
   it("does NOT auto-approve passive codex notifications", () => {
@@ -153,11 +149,11 @@ describe("permission automation: showPermissionBubble chokepoint", () => {
     const permEntry = makePermEntry({ isCodexNotify: true, res: null });
     perm.pendingPermissions.push(permEntry);
 
-    // Passive notify entries route to dismissPassiveNotify on resolve, never
-    // to an allow. Auto-approve must skip them: with win=null the subsequent
-    // bubble build throws, proving the early-return did not consume it.
-    assert.throws(() => perm.showPermissionBubble(permEntry));
-    assert.equal(perm.pendingPermissions.indexOf(permEntry), 0);
+    // Passive notify entries route to dismissPassiveNotify on surface failure,
+    // never to an allow. The marker proves automation skipped it first.
+    assert.doesNotThrow(() => perm.showPermissionBubble(permEntry));
+    assert.equal(typeof permEntry.surfaceEntryId, "string");
+    assert.equal(perm.pendingPermissions.includes(permEntry), false);
   });
 
   it("answers elicitation questions with a deferral reply so allow is a real allow", () => {
@@ -209,13 +205,14 @@ describe("permission automation: showPermissionBubble chokepoint", () => {
     ]) {
       const decision = makePermEntry({ toolName, toolInput });
       perm.pendingPermissions.push(decision);
-      assert.throws(() => perm.showPermissionBubble(decision));
+      assert.doesNotThrow(() => perm.showPermissionBubble(decision));
       assert.strictEqual(
-        perm.pendingPermissions.includes(decision),
-        true,
-        `${toolName} must remain pending for a human`
+        typeof decision.surfaceEntryId,
+        "string",
+        `${toolName} must reach the human surface instead of automation`
       );
-      perm.pendingPermissions.splice(perm.pendingPermissions.indexOf(decision), 1);
+      assert.strictEqual(perm.pendingPermissions.includes(decision), false,
+        "the unavailable test surface returns no-decision instead of throwing");
     }
   });
 
@@ -236,9 +233,11 @@ describe("permission automation: showPermissionBubble chokepoint", () => {
     const entry = makePermEntry(base);
     perm.pendingPermissions.push(entry);
 
-    assert.throws(() => perm.showPermissionBubble(entry));
-    assert.equal(perm.pendingPermissions.includes(entry), true);
+    assert.doesNotThrow(() => perm.showPermissionBubble(entry));
+    assert.equal(typeof entry.surfaceEntryId, "string");
+    assert.equal(perm.pendingPermissions.includes(entry), false);
     assert.equal(res.captured.statusCode, null);
+    assert.equal(res.captured.destroyCalls, 1);
   });
 
   it("allows an immediate session override only after the shared live gate passes", () => {
@@ -283,9 +282,10 @@ describe("permission automation: showPermissionBubble chokepoint", () => {
     });
     perm.pendingPermissions.push(entry);
 
-    assert.throws(() => perm.showPermissionBubble(entry));
-    assert.equal(perm.pendingPermissions.includes(entry), true);
-    assert.equal(res.captured.statusCode, null);
+    assert.doesNotThrow(() => perm.showPermissionBubble(entry));
+    assert.equal(typeof entry.surfaceEntryId, "string");
+    assert.equal(perm.pendingPermissions.includes(entry), false);
+    assert.equal(res.captured.statusCode, 204);
   });
 
   it("lets an eligible TUI Agent thread inherit global auto-tools", () => {
@@ -326,8 +326,9 @@ describe("permission automation: showPermissionBubble chokepoint", () => {
     const entry = makePermEntry({ interaction: { intent: "tool-approval" } });
     perm.pendingPermissions.push(entry);
 
-    assert.throws(() => perm.showPermissionBubble(entry));
-    assert.strictEqual(perm.pendingPermissions.includes(entry), true);
+    assert.doesNotThrow(() => perm.showPermissionBubble(entry));
+    assert.strictEqual(typeof entry.surfaceEntryId, "string");
+    assert.strictEqual(perm.pendingPermissions.includes(entry), false);
   });
 });
 

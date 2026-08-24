@@ -2,7 +2,12 @@ const { describe, it } = require("node:test");
 const assert = require("node:assert");
 
 const permission = require("../src/permission");
-const { computeBubbleStackLayout, clampBubbleHeight, collectVisibleWindowBounds } = permission.__test;
+const {
+  computeBubbleStackLayout,
+  clampBubbleHeight,
+  collectVisibleWindowBounds,
+  computePermissionBubbleWidth,
+} = permission.__test;
 
 // Common defaults so each test only spells out what's interesting.
 const BW = 340;
@@ -385,97 +390,19 @@ describe("permission bubble stack layout", () => {
     for (let i = 0; i < bounds.length - 1; i++) assert.ok(bounds[i].y < bounds[i + 1].y);
   });
 
-  it("ignores Hardware Buddy test entries when stacking visible bubbles", () => {
-    const runtime = permission({
-      win: { isDestroyed: () => false },
-      bubbleFollowPet: false,
-      getPetWindowBounds: () => ({ x: 0, y: 0, width: 80, height: 80 }),
-      getNearestWorkArea: () => FHD,
-      getHitRectScreen: () => null,
-      getHudReservedOffset: () => 0,
-    });
-    const assigned = [];
-    const bubble = (name) => ({
-      isDestroyed: () => false,
-      setBounds: (bounds) => assigned.push([name, bounds]),
-    });
+});
 
-    runtime.addPendingPermission({ bubble: bubble("old"), measuredHeight: 200, suggestions: [] }, "test");
-    runtime.addPendingPermission({
-      bubble: null,
-      measuredHeight: 200,
-      suggestions: [],
-      remoteOnly: true,
-    }, "test");
-    runtime.addPendingPermission({ bubble: bubble("new"), measuredHeight: 200, suggestions: [] }, "test");
-
-    runtime.repositionBubbles();
-
-    assert.deepStrictEqual(assigned, [
-      ["old", { x: 1572, y: 666, width: 340, height: 200 }],
-      ["new", { x: 1572, y: 872, width: 340, height: 200 }],
-    ]);
+describe("permission shared-surface width", () => {
+  it("uses the 420px product width on ordinary work areas", () => {
+    assert.strictEqual(computePermissionBubbleWidth(1, 1920), 420);
   });
 
-  it("uses one fixed target work area for scale, width, height, and corner bounds", () => {
-    const primary = { x: -1600, y: 40, width: 1600, height: 900 };
-    const scaleCalls = [];
-    const runtime = permission({
-      win: { isDestroyed: () => false },
-      bubbleFollowPet: false,
-      bubbleFixedCorner: "top-left",
-      getPetWindowBounds: () => ({ x: 100, y: 100, width: 80, height: 80 }),
-      getBubbleWorkArea: (followPet) => {
-        assert.strictEqual(followPet, false);
-        return primary;
-      },
-      getTextScale: (workArea) => {
-        scaleCalls.push(workArea);
-        return 1.5;
-      },
-      getHitRectScreen: () => null,
-      getHudReservedOffset: () => 0,
-    });
-    const assigned = [];
-    runtime.addPendingPermission({
-      measuredHeight: 200,
-      suggestions: [],
-      bubble: {
-        isDestroyed: () => false,
-        setBounds: (bounds) => assigned.push(bounds),
-      },
-    }, "test");
-
-    runtime.repositionBubbles();
-
-    assert.deepStrictEqual(scaleCalls, [primary]);
-    assert.deepStrictEqual(assigned, [{ x: -1588, y: 52, width: 510, height: 300 }]);
+  it("uses the 380px compact width when scaling would consume the side lane", () => {
+    assert.strictEqual(computePermissionBubbleWidth(1, 800), 380);
   });
 
-  it("wires live HUD bounds into fixed permission bubble repositioning", () => {
-    const workArea = { x: 0, y: 0, width: 1200, height: 800 };
-    const runtime = permission({
-      win: { isDestroyed: () => false },
-      bubbleFollowPet: false,
-      bubbleFixedCorner: "bottom-right",
-      getPetWindowBounds: () => ({ x: 0, y: 0, width: 80, height: 80 }),
-      getBubbleWorkArea: () => workArea,
-      getHitRectScreen: () => null,
-      getSessionHudBounds: () => [{ x: 850, y: 600, width: 350, height: 100 }],
-      getHudReservedOffset: () => 0,
-    });
-    const assigned = [];
-    runtime.addPendingPermission({
-      measuredHeight: 200,
-      suggestions: [],
-      bubble: {
-        isDestroyed: () => false,
-        setBounds: (bounds) => assigned.push(bounds),
-      },
-    }, "test");
-
-    runtime.repositionBubbles();
-
-    assert.deepStrictEqual(assigned, [{ x: 852, y: 394, width: 340, height: 200 }]);
+  it("applies text scale once and keeps the 90% work-area hard cap", () => {
+    assert.strictEqual(computePermissionBubbleWidth(1.5, 1600), 630);
+    assert.strictEqual(computePermissionBubbleWidth(2, 600), 540);
   });
 });

@@ -60,6 +60,9 @@ function createTopmostRuntime(options = {}) {
   const getWin = defaultGetter(options.getWin || null);
   const getHitWin = defaultGetter(options.getHitWin || null);
   const getPendingPermissions = options.getPendingPermissions || (() => []);
+  const getPermissionBubbleWindows = options.getPermissionBubbleWindows || (() => (
+    (getPendingPermissions() || []).map((entry) => entry && entry.bubble).filter(Boolean)
+  ));
   const getUpdateBubbleWindow = options.getUpdateBubbleWindow || (() => null);
   const getSessionHudWindow = options.getSessionHudWindow || (() => null);
   const getQuotaRingWindow = options.getQuotaRingWindow || (() => null);
@@ -251,9 +254,7 @@ function createTopmostRuntime(options = {}) {
 
     apply(getWin());
     apply(getHitWin());
-    for (const perm of getPendingPermissions()) {
-      apply(perm && perm.bubble);
-    }
+    for (const bubble of getPermissionBubbleWindows()) apply(bubble);
     apply(getUpdateBubbleWindow());
     apply(getSessionHudWindow());
     apply(getQuotaRingWindow());
@@ -276,9 +277,9 @@ function createTopmostRuntime(options = {}) {
   function petOverlapsTextInputBubble() {
     let petRect = null;
     let petRectComputed = false;
-    for (const perm of getPendingPermissions() || []) {
-      const bubble = perm && perm.bubble;
+    for (const bubble of getPermissionBubbleWindows() || []) {
       if (!isLiveWindow(bubble) || !bubble.__clawdMacTextInputBubble) continue;
+      if (typeof bubble.isVisible === "function" && !bubble.isVisible()) continue;
       if (typeof bubble.getBounds !== "function") continue;
       if (!petRectComputed) {
         const petBounds = getPetWindowBounds();
@@ -510,8 +511,7 @@ function createTopmostRuntime(options = {}) {
       // the interference stand-down exists to avoid (§8.3).
       if (!skipTopmost) recoverCloakedPet();
 
-      for (const perm of getPendingPermissions()) {
-        const bubble = perm && perm.bubble;
+      for (const bubble of getPermissionBubbleWindows()) {
         if (isLiveWindow(bubble) && bubble.isVisible()) {
           reassertWindowAndTaskbar(bubble);
         }

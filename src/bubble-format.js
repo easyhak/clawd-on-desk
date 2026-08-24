@@ -18,12 +18,12 @@
     return "";
   }
 
-  function formatAntigravityDetail(name, input) {
+  function formatAntigravityDetail(name, input, maxLength = 160) {
     const toolName = typeof name === "string" ? name.trim().toLowerCase() : "";
     if (!toolName) return "";
 
     if (toolName === "run_command" || toolName === "bash" || toolName === "shell") {
-      return truncate(firstStringValue(input, ["CommandLine", "command", "Command", "cmd"]), 160);
+      return truncate(firstStringValue(input, ["CommandLine", "command", "Command", "cmd"]), maxLength);
     }
     if (
       toolName === "write_to_file" ||
@@ -35,54 +35,60 @@
     ) {
       const filePath = firstStringValue(input, ["TargetFile", "AbsolutePath", "file_path", "path", "filePath", "FilePath"]);
       const description = firstStringValue(input, ["Description", "Instruction"]);
-      return truncate(description && filePath ? `${filePath}: ${description}` : (filePath || description), 160);
+      return truncate(description && filePath ? `${filePath}: ${description}` : (filePath || description), maxLength);
     }
     if (toolName === "view_file" || toolName === "read") {
-      return truncate(firstStringValue(input, ["AbsolutePath", "file_path", "path", "filePath", "FilePath"]), 160);
+      return truncate(firstStringValue(input, ["AbsolutePath", "file_path", "path", "filePath", "FilePath"]), maxLength);
     }
     if (toolName === "list_dir") {
-      return truncate(firstStringValue(input, ["DirectoryPath", "path", "directory"]), 160);
+      return truncate(firstStringValue(input, ["DirectoryPath", "path", "directory"]), maxLength);
     }
     if (toolName === "find_by_name") {
       const searchPath = firstStringValue(input, ["SearchDirectory", "DirectoryPath", "path"]);
       const pattern = firstStringValue(input, ["Pattern", "pattern"]);
-      return truncate(pattern && searchPath ? `${searchPath}: ${pattern}` : (searchPath || pattern), 160);
+      return truncate(pattern && searchPath ? `${searchPath}: ${pattern}` : (searchPath || pattern), maxLength);
     }
     if (toolName === "grep_search") {
       const searchPath = firstStringValue(input, ["SearchPath", "SearchDirectory", "DirectoryPath", "path"]);
       const query = firstStringValue(input, ["Query", "query"]);
-      return truncate(query && searchPath ? `${searchPath}: ${query}` : (searchPath || query), 160);
+      return truncate(query && searchPath ? `${searchPath}: ${query}` : (searchPath || query), maxLength);
     }
     if (toolName === "ask_permission") {
       const target = firstStringValue(input, ["Target", "target", "Permission", "permission"]);
       const reason = firstStringValue(input, ["Reason", "reason", "Description", "description"]);
-      return truncate(reason && target ? `${target}: ${reason}` : (target || reason), 160);
+      return truncate(reason && target ? `${target}: ${reason}` : (target || reason), maxLength);
     }
     if (toolName === "read_url_content") {
-      return truncate(firstStringValue(input, ["Url", "url"]), 160);
+      return truncate(firstStringValue(input, ["Url", "url"]), maxLength);
     }
     if (toolName === "search_web") {
-      return truncate(firstStringValue(input, ["query", "Query"]), 160);
+      return truncate(firstStringValue(input, ["query", "Query"]), maxLength);
     }
     return "";
   }
 
   function formatDetail(name, input, options) {
     if (!input || typeof input !== "object") return "";
-    if (typeof input.description === "string" && input.description.trim()) return truncate(input.description.trim(), 120);
-    if (name === "Bash" && typeof input.command === "string") return truncate(input.command, 120);
+    const maxLength = Number.isFinite(options && options.maxLength)
+      ? Math.max(1, Math.floor(options.maxLength))
+      : 120;
+    const fallbackMaxLength = Number.isFinite(options && options.fallbackMaxLength)
+      ? Math.max(1, Math.floor(options.fallbackMaxLength))
+      : 100;
+    if (typeof input.description === "string" && input.description.trim()) return truncate(input.description.trim(), maxLength);
+    if (name === "Bash" && typeof input.command === "string") return truncate(input.command, maxLength);
     if ((name === "Edit" || name === "Write" || name === "Read") && typeof input.file_path === "string")
-      return truncate(input.file_path, 120);
+      return truncate(input.file_path, maxLength);
     if ((name === "Glob" || name === "Grep") && typeof input.pattern === "string")
-      return truncate(input.pattern, 120);
+      return truncate(input.pattern, maxLength);
     if (options && options.isAntigravity) {
-      const antigravityDetail = formatAntigravityDetail(name, input);
+      const antigravityDetail = formatAntigravityDetail(name, input, maxLength);
       if (antigravityDetail) return antigravityDetail;
     }
     for (const v of Object.values(input)) {
-      if (typeof v === "string" && v.trim()) return truncate(v.trim(), 100);
+      if (typeof v === "string" && v.trim()) return truncate(v.trim(), fallbackMaxLength);
     }
-    return truncate(JSON.stringify(input), 100);
+    return truncate(JSON.stringify(input), fallbackMaxLength);
   }
 
   // Issue #445: MCP tool names arrive as opaque, scary-looking identifiers
@@ -200,6 +206,12 @@
     }
   }
 
+  function isIrreversibleScanPartial(name, input) {
+    const toolName = typeof name === "string" ? name.trim().toLowerCase() : "";
+    if (!SHELL_TOOLS.has(toolName) || !input || typeof input !== "object") return false;
+    return firstStringValue(input, ["command", "CommandLine", "Command", "cmd", "script"]).length > 4096;
+  }
+
   function parseMcpToolName(toolName) {
     if (typeof toolName !== "string" || !toolName) return null;
     const segs = toolName.split("__");
@@ -215,7 +227,15 @@
     return { server, tool, display };
   }
 
-  const api = { formatDetail, formatAntigravityDetail, truncate, firstStringValue, parseMcpToolName, detectIrreversible };
+  const api = {
+    formatDetail,
+    formatAntigravityDetail,
+    truncate,
+    firstStringValue,
+    parseMcpToolName,
+    detectIrreversible,
+    isIrreversibleScanPartial,
+  };
 
   if (typeof module === "object" && module.exports) {
     module.exports = api;

@@ -6,7 +6,7 @@ const { getDefaultShortcuts } = require("./shortcut-actions");
 const { keepOutOfTaskbar } = require("./taskbar");
 const { clampTextScale, scaleWidth, scaleHeight, applyZoomToWindow } = require("./text-scale");
 const { createTranslator } = require("./i18n");
-const { firstStringValue } = require("./bubble-format");
+const { firstStringValue, formatDetail, truncate } = require("./bubble-format");
 const { MAC_TOPMOST_LEVEL } = require("./topmost-runtime");
 const { redactSecrets } = require("./secret-redact");
 const path = require("path");
@@ -63,7 +63,9 @@ const BUBBLE_HEIGHT_RESERVE = 24;
 // CSS px. Multiple of 20 on purpose: every 5% textScale step scales it to an
 // integer DIP width, so the CSS viewport width (and therefore renderer-side
 // height measurements) stays exact across scale changes.
-const BUBBLE_BASE_WIDTH = 340;
+const BUBBLE_BASE_WIDTH = 420;
+const BUBBLE_COMPACT_WIDTH = 380;
+const BUBBLE_COMPACT_WORK_AREA_RATIO = 0.42;
 // Hard cap so a scaled bubble can't swallow a small work area.
 const BUBBLE_MAX_WORK_AREA_WIDTH_RATIO = 0.9;
 const PLAN_FEEDBACK_MAX_LENGTH = 4000;
@@ -74,6 +76,17 @@ const PLAN_FEEDBACK_MAX_LENGTH = 4000;
 // endpoint or server-side identity injection first (WorkBuddy's native events
 // carry client:"WorkBuddy", not an agent_id server-agent-id.js recognizes).
 const REMOTE_RICH_APPROVAL_AGENT_IDS = new Set(["claude-code", "codebuddy"]);
+
+function computePermissionBubbleWidth(scale, workAreaWidth) {
+  const waWidth = Math.floor(Number(workAreaWidth) || 0);
+  const fullWidth = scaleWidth(BUBBLE_BASE_WIDTH, scale);
+  const compactWidth = scaleWidth(BUBBLE_COMPACT_WIDTH, scale);
+  const scaled = waWidth > 0 && fullWidth > waWidth * BUBBLE_COMPACT_WORK_AREA_RATIO
+    ? compactWidth
+    : fullWidth;
+  if (waWidth <= 0) return scaled;
+  return Math.min(scaled, Math.floor(waWidth * BUBBLE_MAX_WORK_AREA_WIDTH_RATIO));
+}
 
 function requiredDependency(value, name, owner) {
   if (!value) throw new Error(`${owner} requires ${name}`);
@@ -94,6 +107,9 @@ function registerPermissionIpc(options = {}) {
 
   on("bubble-height", (event, height) => permission.handleBubbleHeight(event, height));
   on("permission-decide", (event, behavior) => permission.handleDecide(event, behavior));
+  if (typeof permission.handleSelect === "function") {
+    on("permission-select", (event, payload) => permission.handleSelect(event, payload));
+  }
   if (typeof permission.handleImeEditing === "function") {
     on("bubble-ime-editing", (event, editing) => permission.handleImeEditing(event, editing));
   }
@@ -641,12 +657,31 @@ module.exports = function initPermission(ctx) {
 // by the next remote-approval payload without recreating this module.
 const t = createTranslator(() => ctx.lang);
 
-// Each entry: { res, abortHandler, suggestions, sessionId, bubble, hideTimer, toolName, toolInput, resolvedSuggestion, createdAt, measuredHeight }
+// Each entry owns its protocol/timer state. BrowserWindow ownership lives in
+// permissionSurface below; an entry never owns or aliases the shared window.
 const pendingPermissions = [];
 // Keep windows independently of pendingPermissions so Orbit continues avoiding
 // a bubble during its 250ms fade-out after the request has already been removed
 // from the pending list.
 const permissionBubbleWindows = new Set();
+let nextSurfaceEntryId = 1;
+let nextSurfaceOrdinal = 1;
+const permissionSurface = {
+  window: null,
+  ready: false,
+  nativeMode: null,
+  activeEntryId: null,
+  surfaceRevision: 0,
+  activeContentRevision: 0,
+  measuredHeight: 0,
+  hideTimer: null,
+  handover: null,
+  expectedDestroyWindows: new Set(),
+  pendingShowRevision: null,
+  deliveryEntryIds: new Set(),
+  petHidden: !!ctx.petHidden,
+  petHiddenCutoffOrdinal: null,
+};
 // Pure-metadata tools auto-allowed without showing a bubble (zero side effects)
 const PASSTHROUGH_TOOLS = new Set([
   "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskStop", "TaskOutput",
@@ -701,16 +736,14 @@ function getActionablePermissions() {
 // visible, keep the plain actionable list: entries without a bubble window
 // (creation failed / not yet created) must stay hotkey-reachable.
 function getHotkeyActionablePermissions() {
-  const actionable = getActionablePermissions();
-  if (!ctx.petHidden) return actionable;
-  return actionable.filter((p) => {
-    const bub = p.bubble;
-    try {
-      return !!bub && !bub.isDestroyed() && bub.isVisible();
-    } catch {
-      return false;
-    }
-  });
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (!active || !getActionablePermissions().includes(active)) return [];
+  const bub = permissionSurface.window;
+  try {
+    return bub && !bub.isDestroyed() && bub.isVisible() ? [active] : [];
+  } catch {
+    return [];
+  }
 }
 
 function syncSingle(actionId, current, target, handler, setState) {
@@ -783,7 +816,7 @@ function getVisibleBubbleBounds() {
 function hotkeyResolve(behavior, message) {
   const targets = getHotkeyActionablePermissions();
   if (!targets.length) return;
-  const perm = targets[targets.length - 1]; // newest
+  const perm = targets[0];
   captureFrontApp((appName) => {
     resolvePermissionEntry(perm, behavior, message);
     if (appName) {
@@ -812,10 +845,7 @@ function getTextScale(workArea) {
 }
 
 function getBubbleWidth(scale, workArea) {
-  const scaled = scaleWidth(BUBBLE_BASE_WIDTH, scale);
-  const waWidth = Math.floor(Number(workArea && workArea.width) || 0);
-  if (waWidth <= 0) return scaled;
-  return Math.min(scaled, Math.floor(waWidth * BUBBLE_MAX_WORK_AREA_WIDTH_RATIO));
+  return computePermissionBubbleWidth(scale, workArea && workArea.width);
 }
 
 function getAnchorWorkArea(petBounds) {
@@ -851,17 +881,16 @@ function repositionBubbles() {
   const hitRect = ctx.bubbleFollowPet ? ctx.getHitRectScreen(petBounds) : null;
   const hudAvoidRects = getHudAvoidRects();
 
-  const layoutPermissions = pendingPermissions.filter((perm) => !perm.remoteOnly);
-  const bubbleHeights = layoutPermissions.map(perm =>
-    clampBubbleHeight(
-      // measuredHeight/estimate are CSS px; the window needs DIP.
-      scaleHeight(
-        perm.measuredHeight || estimateBubbleHeight((perm.suggestions || []).length),
-        scale
-      ),
-      wa.height
-    )
-  );
+  const bub = permissionSurface.window;
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (!bub || bub.isDestroyed() || !active) return;
+  const bubbleHeights = [clampBubbleHeight(
+    scaleHeight(
+      permissionSurface.measuredHeight || estimateBubbleHeight((active.suggestions || []).length),
+      scale
+    ),
+    wa.height
+  )];
 
   const bounds = computeBubbleStackLayout({
     followPet: !!ctx.bubbleFollowPet,
@@ -882,21 +911,10 @@ function repositionBubbles() {
     avoidRects: hudAvoidRects,
   });
 
-  for (let i = 0; i < layoutPermissions.length; i++) {
-    const perm = layoutPermissions[i];
-    if (perm.bubble && !perm.bubble.isDestroyed() && bounds[i]) {
-      // Re-resolve zoom here too: the pet may have crossed onto a display
-      // with a different textScale (applyZoomToWindow memoizes, so this is
-      // a no-op when nothing changed).
-      applyZoomToWindow(perm.bubble, scale);
-      // #640: a bubble whose text field is being typed into holds its
-      // position — followPet anchoring must not yank the input box around
-      // mid-composition (pet drag; roam is separately paused while editing).
-      // Fresh bubbles never carry the flag, so they still get placed.
-      if (perm.bubble.__clawdMacImeEditing) continue;
-      perm.bubble.setBounds(bounds[i]);
-    }
-  }
+  if (!bounds[0]) return;
+  applyZoomToWindow(bub, scale);
+  if (bub.__clawdMacImeEditing) return;
+  bub.setBounds(bounds[0]);
 }
 
 // Permission-automation chokepoint. Every agent branch in the /permission route
@@ -1100,181 +1118,465 @@ function handlePermissionBubbleFailure(permEntry, reason) {
   return true;
 }
 
-function showPermissionBubble(permEntry) {
-  // Auto-pilot: if enabled, approve immediately and never render a bubble.
-  if (maybeAutoApprovePermission(permEntry)) return;
+function ensureSurfaceEntryIdentity(permEntry) {
+  if (!permEntry.surfaceEntryId) {
+    permEntry.surfaceEntryId = `permission-${nextSurfaceEntryId++}`;
+  }
+  if (!Number.isFinite(permEntry.surfaceOrdinal)) {
+    permEntry.surfaceOrdinal = nextSurfaceOrdinal++;
+  }
+  return permEntry;
+}
 
-  const canOfferSessionTrust = typeof ctx.canOfferSessionTrust === "function"
-    && ctx.canOfferSessionTrust(permEntry) === true;
-  const sugCount = (permEntry.suggestions || []).length + (canOfferSessionTrust ? 1 : 0);
-  const wa = getAnchorWorkArea();
-  const scale = getTextScale(wa);
-  const bh = clampBubbleHeight(scaleHeight(estimateBubbleHeight(sugCount), scale), wa.height);
-  // Temporary position — repositionBubbles() will finalize after renderer reports real height
-  const pos = { x: 0, y: 0, width: getBubbleWidth(scale, wa), height: bh };
+function getSurfaceEntryById(entryId) {
+  if (!entryId) return null;
+  return pendingPermissions.find((entry) => entry && entry.surfaceEntryId === entryId) || null;
+}
 
-  // Bubbles that host a text input (elicitation "Other", ExitPlanMode
-  // feedback) need keyboard focus. On macOS, the topmost level is dropped
-  // per-edit at runtime instead (see handleImeEditing) so the IME candidate
-  // window isn't occluded.
-  const interactionCapabilities = isValidInteraction(permEntry.interaction)
+function isSurfaceEntrySuppressed(permEntry) {
+  return !!(
+    permissionSurface.petHidden
+    && Number.isFinite(permissionSurface.petHiddenCutoffOrdinal)
+    && Number.isFinite(permEntry && permEntry.surfaceOrdinal)
+    && permEntry.surfaceOrdinal <= permissionSurface.petHiddenCutoffOrdinal
+  );
+}
+
+function getSurfaceEligibleEntries() {
+  return pendingPermissions.filter((entry) => entry
+    && entry.surfaceEligible === true
+    && entry.remoteOnly !== true
+    && !isSurfaceEntrySuppressed(entry));
+}
+
+function getEntryCapabilities(permEntry) {
+  return isValidInteraction(permEntry && permEntry.interaction)
     ? permEntry.interaction.capabilities
     : {};
-  const needsTextInput = interactionCapabilities.answerQuestions === true
-    || interactionCapabilities.planFeedback === true;
+}
 
-  const bub = new BrowserWindow({
-    width: pos.width,
-    height: pos.height,
-    x: pos.x,
-    y: pos.y,
-    show: false, // Fix lost focus
-    frame: false,
-    transparent: true,
-    alwaysOnTop: !isMac,
-    resizable: false,
-    skipTaskbar: true,
-    hasShadow: false,
-    ...(isLinux ? { type: LINUX_WINDOW_TYPE } : {}),
-    ...(isMac ? { type: "panel", acceptFirstMouse: true } : {}),
-    // Elicitation needs keyboard focus for the Other/textarea input path.
-    // Permission prompts need focusable: true on macOS to receive clicks,
-    // while acceptFirstMouse lets the first click hit the inactive panel.
-    // ExitPlanMode needs keyboard focus for the "Tell Claude what to change"
-    // textarea feedback path on other platforms.
-    focusable: isMac ? true : needsTextInput,
-    webPreferences: {
-      preload: path.join(__dirname, "preload-bubble.js"),
-      nodeIntegration: false,
-      contextIsolation: true,
-    },
+function getPermissionNativeMode(permEntry) {
+  const capabilities = getEntryCapabilities(permEntry);
+  return capabilities.answerQuestions === true
+    || capabilities.planFeedback === true
+    || permEntry?.isElicitation === true
+    ? "text-input"
+    : "default";
+}
+
+function isSurfaceSwitchingLocked(permEntry) {
+  return getPermissionNativeMode(permEntry) === "text-input";
+}
+
+function selectSurfaceActiveEntry(entries) {
+  if (!entries.length) return null;
+  const current = getSurfaceEntryById(permissionSurface.activeEntryId);
+  const firstInteractive = entries.find((entry) => !isPassiveNotifyEntry(entry)) || null;
+  if (current && entries.includes(current)) {
+    if (isPassiveNotifyEntry(current) && firstInteractive) return firstInteractive;
+    return current;
+  }
+  return firstInteractive || entries[0];
+}
+
+function getSurfaceQueueSummary(permEntry) {
+  const detail = formatDetail(permEntry.toolName, permEntry.toolInput, {
+    isAntigravity: !!permEntry.isAntigravity,
+    maxLength: 140,
+    fallbackMaxLength: 140,
   });
+  return truncate(detail || permEntry.toolName || "Permission request", 140);
+}
 
-  // Partial-create rollback: a synchronous throw after the BrowserWindow
-  // exists (setAlwaysOnTop/showInactive/repositioning on exotic platforms,
-  // shortcut sync, autoclose arming) must not orphan a live window with
-  // registered close handlers while the route-level catch drops the pending
-  // entry — nothing would ever close that window. Strip listeners, destroy
-  // the window, and rethrow so the caller finishes the rollback.
+function getSurfaceSessionLabel(permEntry) {
+  const sess = ctx.sessions.get(permEntry.sessionId);
+  if (sess && sess.cwd) return path.basename(sess.cwd);
+  return permEntry.sessionId ? String(permEntry.sessionId).slice(-3) : "";
+}
+
+function buildPermissionSurfacePayload(activeEntry, options = {}) {
+  const entries = getSurfaceEligibleEntries();
+  const queue = entries
+    .filter((entry) => entry !== activeEntry)
+    .map((entry) => ({
+      entryId: entry.surfaceEntryId,
+      kind: isPassiveNotifyEntry(entry) ? "notification" : "permission",
+      toolLabel: entry.toolName || "Permission",
+      sessionLabel: getSurfaceSessionLabel(entry),
+      summary: getSurfaceQueueSummary(entry),
+    }));
+  const wa = getAnchorWorkArea();
+  const scale = getTextScale(wa);
+  const activeIndex = Math.max(0, entries.indexOf(activeEntry));
+  return {
+    surfaceRevision: options.surfaceRevision ?? permissionSurface.surfaceRevision,
+    activeContentRevision: options.activeContentRevision ?? permissionSurface.activeContentRevision,
+    activeEntryId: activeEntry.surfaceEntryId,
+    active: buildPermissionBubblePayload(activeEntry),
+    queue,
+    entryIds: entries.map((entry) => entry.surfaceEntryId),
+    totalCount: entries.length,
+    activeIndex,
+    switchingLocked: isSurfaceSwitchingLocked(activeEntry),
+    restoreInteractionControls: options.restoreInteractionControls === true,
+    measureCeiling: Math.max(1, Math.ceil((wa.height * 2) / scale)),
+  };
+}
+
+function sendPermissionSurfacePayload(win, activeEntry, options = {}) {
+  if (!win || win.isDestroyed() || !win.webContents) return null;
+  if (typeof win.webContents.isDestroyed === "function" && win.webContents.isDestroyed()) return null;
+  const surfaceRevision = options.surfaceRevision ?? ++permissionSurface.surfaceRevision;
+  const payload = buildPermissionSurfacePayload(activeEntry, {
+    ...options,
+    surfaceRevision,
+  });
+  win.webContents.send("permission-show", payload);
+  if (win === permissionSurface.window) {
+    permissionSurface.deliveryEntryIds = new Set(payload.entryIds);
+    let visible = false;
+    try { visible = win.isVisible(); } catch {}
+    if (!visible) permissionSurface.pendingShowRevision = surfaceRevision;
+  }
+  return payload;
+}
+
+function clearPermissionSurfaceWindow(win) {
+  permissionBubbleWindows.delete(win);
+  if (permissionSurface.window !== win) return;
+  permissionSurface.window = null;
+  permissionSurface.ready = false;
+  permissionSurface.nativeMode = null;
+  permissionSurface.measuredHeight = 0;
+  permissionSurface.pendingShowRevision = null;
+  permissionSurface.deliveryEntryIds = new Set();
+}
+
+function clearPermissionSurfaceImeEditing(win = permissionSurface.window) {
+  if (!win || win.__clawdMacImeEditing !== true) return;
+  delete win.__clawdMacImeEditing;
+  if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
+  if (typeof ctx.syncImeEditingPetDodge === "function") {
+    try { ctx.syncImeEditingPetDodge(); } catch {}
+  }
+}
+
+let surfaceFailureSweepActive = false;
+
+function handleServingSurfaceFailure(win, reason) {
+  if (!win || win.__clawdSurfaceFailureHandled || permissionSurface.window !== win) return false;
+  win.__clawdSurfaceFailureHandled = true;
+  handleBubbleRendererGone(win);
+  const deliveryEntries = [...permissionSurface.deliveryEntryIds]
+    .map((entryId) => getSurfaceEntryById(entryId))
+    .filter(Boolean);
+  permissionSurface.expectedDestroyWindows.add(win);
+  clearPermissionSurfaceWindow(win);
   try {
-    permEntry.bubble = bub;
-    permissionBubbleWindows.add(bub);
-    permEntry.bubbleReady = false;
-    // macOS: text-input bubbles skip the native stationary treatment (SkyLight
-    // private space) that occludes the OS IME candidate window. They stay
-    // cross-space visible via Electron and drop out of always-on-top while a text
-    // field is focused (handleImeEditing) so CJK input popups can surface.
-    if (isMac && needsTextInput) bub.__clawdMacTextInputBubble = true;
-
-    if (isWin) {
-      bub.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+    if (!win.isDestroyed()) win.destroy();
+  } catch {}
+  surfaceFailureSweepActive = true;
+  try {
+    for (const entry of deliveryEntries) {
+      if (pendingPermissions.includes(entry)) handlePermissionBubbleFailure(entry, reason);
     }
+  } finally {
+    surfaceFailureSweepActive = false;
+  }
+  repositionDependentBubbles();
+  syncPermissionShortcuts();
+  return true;
+}
 
-    bub.webContents.once("did-finish-load", () => {
-      if (pendingPermissions.indexOf(permEntry) === -1 || permEntry.bubble !== bub) return;
-      permEntry.bubbleReady = true;
-      // Explicit even though same-origin propagation usually covers it — a
-      // stale partition-persisted factor must never win over prefs.
-      applyZoomToWindow(bub, getTextScale(getAnchorWorkArea()));
-      syncPermissionBubbleContent(permEntry);
-      // Elicitation bubbles need keyboard focus so arrow keys and Enter work.
-      // Regular permission bubbles must NOT steal focus from the terminal —
-      // doing so triggers false "User answered in terminal" denials in Claude Code.
-      if (interactionCapabilities.answerQuestions === true) {
-        bub.focus();
-      }
+function failPermissionSurfaceHandover(win, reason) {
+  const handover = permissionSurface.handover;
+  if (!handover || handover.window !== win) return false;
+  permissionSurface.handover = null;
+  permissionSurface.expectedDestroyWindows.add(win);
+  try { if (!win.isDestroyed()) win.destroy(); } catch {}
+  permLog(`permission surface handover failed: ${reason}`);
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (active && permissionSurface.window && permissionSurface.ready) {
+    sendPermissionSurfacePayload(permissionSurface.window, active, {
+      restoreInteractionControls: true,
     });
+  }
+  return true;
+}
 
-    bub.on("closed", () => {
-      permissionBubbleWindows.delete(bub);
-      const idx = pendingPermissions.indexOf(permEntry);
-      if (idx !== -1) {
-        // Qwen + Copilot + ZCode + DSH can hand no-decision back to their native
-        // flow. Hermes has no native permission UI, so its opt-in plugin gate
-        // treats this as a retryable block. In every case we avoid fabricating a
-        // user denial. CC/CodeBuddy still get an explicit deny for this
-        // user-close action.
-        const behavior = (
-          permEntry.isQwenCode
-          || permEntry.isCopilotCli
-          || permEntry.isHermes
-          || permEntry.isZcode
-          || permEntry.isDsh
-        ) ? "no-decision" : "deny";
-        resolvePermissionEntry(permEntry, behavior, "Bubble window closed by user");
-      }
-      repositionDependentBubbles();
-    });
+function behaviorForUserClosedEntry(permEntry) {
+  return (
+    permEntry?.isQwenCode
+    || permEntry?.isCopilotCli
+    || permEntry?.isHermes
+    || permEntry?.isZcode
+    || permEntry?.isDsh
+  ) ? "no-decision" : "deny";
+}
 
-    function failPermissionBubble(reason) {
-      if (
-        permEntry._bubbleFatalHandled
-        || pendingPermissions.indexOf(permEntry) === -1
-        || permEntry.bubble !== bub
-      ) {
-        return false;
-      }
-      handleBubbleRendererGone(bub);
-      return handlePermissionBubbleFailure(permEntry, reason);
-    }
-
-    // Loading or renderer failure must release the blocking hook. Returning
-    // no-decision lets agents with a native approval flow take over and avoids
-    // fabricating either an allow or a deny.
-    bub.webContents.once("did-fail-load", (_event, errorCode, errorDescription) => {
-      failPermissionBubble(
-        `Permission bubble failed to load (${errorCode || "unknown"}: ${errorDescription || "unknown error"})`
-      );
-    });
-    bub.webContents.on("render-process-gone", (_event, details) => {
-      const reason = details && details.reason ? details.reason : "unknown";
-      failPermissionBubble(`Permission bubble renderer exited (${reason})`);
-    });
-
-    let loadFailedSynchronously = false;
-    try {
-      const loadResult = bub.loadFile(path.join(__dirname, "bubble.html"));
-      if (loadResult && typeof loadResult.catch === "function") {
-        loadResult.catch((err) => {
-          failPermissionBubble(
-            `Permission bubble failed to load: ${err && err.message ? err.message : String(err)}`
-          );
+function onPermissionSurfaceClosed(win, userInitiatedClose) {
+  const expected = permissionSurface.expectedDestroyWindows.delete(win);
+  if (permissionSurface.handover && permissionSurface.handover.window === win) {
+    if (!expected) {
+      permissionSurface.handover = null;
+      permLog("permission surface handover failed: candidate window closed");
+      const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+      if (active && permissionSurface.window && permissionSurface.ready) {
+        sendPermissionSurfacePayload(permissionSurface.window, active, {
+          restoreInteractionControls: true,
         });
       }
-    } catch (err) {
-      loadFailedSynchronously = failPermissionBubble(
-        `Permission bubble failed to load: ${err && err.message ? err.message : String(err)}`
-      );
     }
-    if (loadFailedSynchronously) return;
-
-    // macOS: set alwaysOnTop BEFORE showInactive to prevent bubble from sinking.
-    // (Text-input bubbles later drop out of always-on-top per-edit — and skip the
-    // native SkyLight path — so their IME candidate window can surface; that's
-    // handled by handleImeEditing + reapplyMacVisibility, not a lower level here.)
-    if (isMac) {
-      bub.setAlwaysOnTop(true, MAC_TOPMOST_LEVEL);
-    }
-
-    repositionBubbles();
-    bub.showInactive();
-    repositionDependentBubbles();
-    keepOutOfTaskbar(bub);
-    // macOS: defer full visibility restoration to avoid activating Clawd
-    if (isMac) deferMacFloatingVisibility(ctx, bub);
-    else ctx.reapplyMacVisibility();
-
-    ctx.guardAlwaysOnTop(bub);
-    syncPermissionShortcuts();
-
-    armPermissionAutoCloseTimer(permEntry);
-  } catch (createErr) {
-    try { bub.removeAllListeners("closed"); } catch {}
-    try { bub.destroy(); } catch {}
-    permissionBubbleWindows.delete(bub);
-    permEntry.bubble = null;
-    throw createErr;
+    return;
   }
+  if (permissionSurface.window !== win) {
+    permissionBubbleWindows.delete(win);
+    return;
+  }
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (expected) {
+    clearPermissionSurfaceWindow(win);
+    return;
+  }
+  if (userInitiatedClose) {
+    clearPermissionSurfaceWindow(win);
+    if (active && pendingPermissions.includes(active)) {
+      resolvePermissionEntry(active, behaviorForUserClosedEntry(active), "Bubble window closed by user");
+    } else {
+      syncPermissionSurface("user-close-empty");
+    }
+    return;
+  }
+  handleServingSurfaceFailure(win, "Permission bubble window closed unexpectedly");
+}
+
+function createPermissionSurfaceWindow(nativeMode, role = "serving") {
+  const wa = getAnchorWorkArea();
+  const scale = getTextScale(wa);
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  const sugCount = active ? (active.suggestions || []).length : 0;
+  const height = clampBubbleHeight(scaleHeight(estimateBubbleHeight(sugCount), scale), wa.height);
+  let bub = null;
+  try {
+    bub = new BrowserWindow({
+      width: getBubbleWidth(scale, wa),
+      height,
+      x: 0,
+      y: 0,
+      show: false,
+      frame: false,
+      transparent: true,
+      alwaysOnTop: !isMac,
+      resizable: false,
+      skipTaskbar: true,
+      hasShadow: false,
+      ...(isLinux ? { type: LINUX_WINDOW_TYPE } : {}),
+      ...(isMac ? { type: "panel", acceptFirstMouse: true } : {}),
+      focusable: isMac ? true : nativeMode === "text-input",
+      webPreferences: {
+        preload: path.join(__dirname, "preload-bubble.js"),
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+    if (role === "handover") {
+      if (!permissionSurface.handover) throw new Error("Missing permission surface handover owner");
+      permissionSurface.handover.window = bub;
+    } else {
+      permissionSurface.window = bub;
+      permissionSurface.ready = false;
+      permissionBubbleWindows.add(bub);
+    }
+    if (isMac && nativeMode === "text-input") bub.__clawdMacTextInputBubble = true;
+    if (isWin) bub.setAlwaysOnTop(true, WIN_TOPMOST_LEVEL);
+    if (isMac) bub.setAlwaysOnTop(true, MAC_TOPMOST_LEVEL);
+    let userInitiatedClose = false;
+    bub.on("close", () => {
+      if (!permissionSurface.expectedDestroyWindows.has(bub)) userInitiatedClose = true;
+    });
+    bub.on("closed", () => onPermissionSurfaceClosed(bub, userInitiatedClose));
+    bub.webContents.once("did-finish-load", () => {
+      applyZoomToWindow(bub, getTextScale(getAnchorWorkArea()));
+      if (permissionSurface.handover && permissionSurface.handover.window === bub) {
+        const target = getSurfaceEntryById(permissionSurface.handover.toActiveEntryId);
+        if (!target) {
+          failPermissionSurfaceHandover(bub, "target no longer pending");
+          return;
+        }
+        permissionSurface.handover.ready = true;
+        const payload = sendPermissionSurfacePayload(bub, target, {
+          activeContentRevision: permissionSurface.handover.activeContentRevision,
+        });
+        if (payload) permissionSurface.handover.surfaceRevision = payload.surfaceRevision;
+        return;
+      }
+      if (permissionSurface.window !== bub) return;
+      permissionSurface.ready = true;
+      syncPermissionSurface("did-finish-load");
+    });
+    bub.webContents.once("did-fail-load", (_event, errorCode, errorDescription) => {
+      const reason = `Permission bubble failed to load (${errorCode || "unknown"}: ${errorDescription || "unknown error"})`;
+      if (!failPermissionSurfaceHandover(bub, reason)) handleServingSurfaceFailure(bub, reason);
+    });
+    bub.webContents.on("render-process-gone", (_event, details) => {
+      const reason = `Permission bubble renderer exited (${details?.reason || "unknown"})`;
+      if (!failPermissionSurfaceHandover(bub, reason)) handleServingSurfaceFailure(bub, reason);
+    });
+    const loadResult = bub.loadFile(path.join(__dirname, "bubble.html"));
+    if (loadResult && typeof loadResult.catch === "function") {
+      loadResult.catch((err) => {
+        const reason = `Permission bubble failed to load: ${err?.message || String(err)}`;
+        if (!failPermissionSurfaceHandover(bub, reason)) handleServingSurfaceFailure(bub, reason);
+      });
+    }
+    keepOutOfTaskbar(bub);
+    ctx.guardAlwaysOnTop(bub);
+    return bub;
+  } catch (err) {
+    if (bub) {
+      permissionSurface.expectedDestroyWindows.add(bub);
+      try { bub.destroy(); } catch {}
+      permissionBubbleWindows.delete(bub);
+      if (permissionSurface.window === bub) clearPermissionSurfaceWindow(bub);
+      if (permissionSurface.handover?.window === bub) permissionSurface.handover.window = null;
+    }
+    throw err;
+  }
+}
+
+function beginPermissionSurfaceHandover(targetEntry) {
+  const current = getSurfaceEntryById(permissionSurface.activeEntryId);
+  const fromActiveEntryId = current?.surfaceEntryId || permissionSurface.activeEntryId;
+  if (!fromActiveEntryId || !permissionSurface.window || permissionSurface.handover) return false;
+  const nativeMode = getPermissionNativeMode(targetEntry);
+  const handover = {
+    window: null,
+    ready: false,
+    fromActiveEntryId,
+    toActiveEntryId: targetEntry.surfaceEntryId,
+    nativeMode,
+    surfaceRevision: null,
+    activeContentRevision: permissionSurface.activeContentRevision + 1,
+  };
+  permissionSurface.handover = handover;
+  try {
+    createPermissionSurfaceWindow(nativeMode, "handover");
+    return true;
+  } catch (err) {
+    permissionSurface.handover = null;
+    permLog(`permission surface handover create failed: ${err?.message || String(err)}`);
+    if (current && permissionSurface.window && permissionSurface.ready) {
+      sendPermissionSurfacePayload(permissionSurface.window, current, {
+        restoreInteractionControls: true,
+      });
+    } else if (pendingPermissions.includes(targetEntry)) {
+      handlePermissionBubbleFailure(targetEntry, "Permission bubble mode switch failed");
+    }
+    return false;
+  }
+}
+
+function schedulePermissionSurfaceExit({ destroy }) {
+  const win = permissionSurface.window;
+  if (!win || win.isDestroyed()) return;
+  try { win.webContents?.send("permission-hide"); } catch {}
+  if (permissionSurface.hideTimer) clearTimeout(permissionSurface.hideTimer);
+  permissionSurface.hideTimer = setTimeout(() => {
+    permissionSurface.hideTimer = null;
+    if (permissionSurface.window !== win || win.isDestroyed()) return;
+    if (destroy) {
+      permissionSurface.expectedDestroyWindows.add(win);
+      clearPermissionSurfaceWindow(win);
+      try { win.destroy(); } catch {}
+    } else {
+      try { win.hide(); } catch {}
+    }
+    syncPermissionShortcuts();
+    repositionDependentBubbles();
+  }, 250);
+}
+
+function syncPermissionSurface(reason = "sync", options = {}) {
+  if (surfaceFailureSweepActive) return false;
+  const entries = getSurfaceEligibleEntries();
+  const hasSuppressedEntries = pendingPermissions.some((entry) => entry?.surfaceEligible && isSurfaceEntrySuppressed(entry));
+  if (entries.length === 0) {
+    permissionSurface.deliveryEntryIds = new Set();
+    if (!hasSuppressedEntries) permissionSurface.activeEntryId = null;
+    if (permissionSurface.window) schedulePermissionSurfaceExit({ destroy: !hasSuppressedEntries });
+    syncPermissionShortcuts();
+    return false;
+  }
+
+  if (permissionSurface.hideTimer) {
+    clearTimeout(permissionSurface.hideTimer);
+    permissionSurface.hideTimer = null;
+  }
+  let target = options.targetEntry && entries.includes(options.targetEntry)
+    ? options.targetEntry
+    : selectSurfaceActiveEntry(entries);
+  if (!target) return false;
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  const targetMode = getPermissionNativeMode(target);
+
+  if (permissionSurface.window && !permissionSurface.window.isDestroyed()
+      && permissionSurface.nativeMode && permissionSurface.nativeMode !== targetMode) {
+    if (!permissionSurface.handover || permissionSurface.handover.toActiveEntryId !== target.surfaceEntryId) {
+      beginPermissionSurfaceHandover(target);
+    }
+    return true;
+  }
+
+  if (!permissionSurface.window || permissionSurface.window.isDestroyed()) {
+    permissionSurface.activeEntryId = target.surfaceEntryId;
+    permissionSurface.activeContentRevision += 1;
+    permissionSurface.nativeMode = targetMode;
+    permissionSurface.deliveryEntryIds = new Set(entries.map((entry) => entry.surfaceEntryId));
+    try {
+      createPermissionSurfaceWindow(targetMode, "serving");
+    } catch (err) {
+      const reason = `Permission bubble failed to create: ${err?.message || String(err)}`;
+      surfaceFailureSweepActive = true;
+      try {
+        for (const entry of entries) {
+          if (pendingPermissions.includes(entry)) handlePermissionBubbleFailure(entry, reason);
+        }
+      } finally {
+        surfaceFailureSweepActive = false;
+      }
+      syncPermissionShortcuts();
+      repositionDependentBubbles();
+      return false;
+    }
+    syncPermissionShortcuts();
+    return true;
+  }
+
+  const activeChanged = !active || active.surfaceEntryId !== target.surfaceEntryId;
+  if (activeChanged) {
+    clearPermissionSurfaceImeEditing();
+    permissionSurface.activeEntryId = target.surfaceEntryId;
+    permissionSurface.activeContentRevision += 1;
+    permissionSurface.measuredHeight = 0;
+  } else if (options.activeContentChanged === true) {
+    permissionSurface.activeContentRevision += 1;
+  }
+  if (!permissionSurface.ready) return true;
+  sendPermissionSurfacePayload(permissionSurface.window, target, {
+    restoreInteractionControls: options.restoreInteractionControls === true,
+  });
+  repositionBubbles();
+  repositionDependentBubbles();
+  syncPermissionShortcuts();
+  return true;
+}
+
+function showPermissionBubble(permEntry) {
+  if (maybeAutoApprovePermission(permEntry)) return;
+  ensureSurfaceEntryIdentity(permEntry);
+  permEntry.surfaceEligible = true;
+  syncPermissionSurface("show", { targetEntry: selectSurfaceActiveEntry(getSurfaceEligibleEntries()) });
+  armPermissionAutoCloseTimer(permEntry);
 }
 // Autoclose: set up the dismiss-without-decision timer for a single pending
 // permission. Passive notification entries (codex/kimi) own their own
@@ -1328,6 +1630,7 @@ function notifyPermissionsChanged(reason) {
       permLog(`syncImeEditingPetDodge failed: ${err && err.message ? err.message : err}`);
     }
   }
+  syncPermissionSurface(reason || "permissions-changed");
   if (typeof ctx.onPermissionsChanged !== "function") return;
   try {
     ctx.onPermissionsChanged(reason);
@@ -1438,11 +1741,16 @@ function buildPermissionBubblePayload(permEntry) {
   };
 }
 
+function refreshPermissionEntry(permEntry) {
+  if (!permEntry || !pendingPermissions.includes(permEntry) || permEntry.surfaceEligible !== true) return false;
+  const isActive = permEntry.surfaceEntryId === permissionSurface.activeEntryId;
+  return syncPermissionSurface("entry-refresh", {
+    activeContentChanged: isActive,
+  });
+}
+
 function syncPermissionBubbleContent(permEntry) {
-  const bub = permEntry && permEntry.bubble;
-  if (!bub || bub.isDestroyed() || !permEntry.bubbleReady) return false;
-  bub.webContents.send("permission-show", buildPermissionBubblePayload(permEntry));
-  return true;
+  return refreshPermissionEntry(permEntry);
 }
 
 function beginSessionTrustConfirmation(permEntry) {
@@ -1911,52 +2219,9 @@ function cancelRemoteApproval(permEntry, options = {}) {
 // A renderer crash may leave the BrowserWindow alive while webContents is
 // already gone, so never assume either object can still receive IPC.
 function hidePermissionBubbleSafely(permEntry) {
-  const bub = permEntry && permEntry.bubble;
-  if (!bub) return false;
-
-  let bubbleDestroyed = false;
-  try {
-    bubbleDestroyed = typeof bub.isDestroyed === "function" && bub.isDestroyed();
-  } catch (err) {
-    permLog(`permission bubble state check failed: ${err && err.message ? err.message : String(err)}`);
-    bubbleDestroyed = true;
-  }
-  if (bubbleDestroyed) return false;
-
-  try {
-    const bubbleContents = bub.webContents;
-    if (
-      bubbleContents
-      && typeof bubbleContents.send === "function"
-      && (
-        typeof bubbleContents.isDestroyed !== "function"
-        || !bubbleContents.isDestroyed()
-      )
-    ) {
-      bubbleContents.send("permission-hide");
-    }
-  } catch (err) {
-    permLog(`permission bubble hide failed: ${err && err.message ? err.message : String(err)}`);
-  }
-
-  if (permEntry.hideTimer) clearTimeout(permEntry.hideTimer);
-  permEntry.hideTimer = setTimeout(() => {
-    try {
-      if (
-        bub
-        && (
-          typeof bub.isDestroyed !== "function"
-          || !bub.isDestroyed()
-        )
-        && typeof bub.destroy === "function"
-      ) {
-        bub.destroy();
-      }
-    } catch (err) {
-      permLog(`permission bubble destroy failed: ${err && err.message ? err.message : String(err)}`);
-    }
-  }, 250);
-  return true;
+  if (permEntry) permEntry.surfaceEligible = false;
+  syncPermissionSurface("entry-hidden");
+  return !!permissionSurface.window;
 }
 
 // A remote-only entry (bubbles disabled, decided over Feishu/Telegram) has no
@@ -2366,9 +2631,10 @@ function applyPermissionSuggestion(perm, index, options = {}) {
   // Minimum display time: if bubble just appeared and dismiss is automatic
   // (client disconnect / terminal answer), delay so user can see it briefly
   const MIN_BUBBLE_DISPLAY_MS = 2000;
-  const age = Date.now() - (permEntry.createdAt || 0);
+  const age = Date.now() - (permEntry.firstActivePresentedAt || permEntry.createdAt || 0);
   const isAutoResolve = message === "Client disconnected";
-  if (isAutoResolve && permEntry.bubble && age < MIN_BUBBLE_DISPLAY_MS && !permEntry._delayedResolve) {
+  if (isAutoResolve && Number.isFinite(permEntry.firstActivePresentedAt)
+      && age < MIN_BUBBLE_DISPLAY_MS && !permEntry._delayedResolve) {
     permEntry._delayedResolve = true;
     permEntry._delayTimer = setTimeout(() => resolvePermissionEntry(permEntry, behavior, message), MIN_BUBBLE_DISPLAY_MS - age);
     return;
@@ -2778,23 +3044,156 @@ function sendHermesPermissionResponse(res, responseObj) {
   return true;
 }
 
-function handleBubbleHeight(event, height) {
-  const senderWin = BrowserWindow.fromWebContents(event.sender);
-  const perm = pendingPermissions.find(p => p.bubble === senderWin);
-  if (perm && typeof height === "number" && height > 0) {
-    perm.measuredHeight = Math.ceil(height);
-    // revealCard() reports height on the next animation frame, so this is the
-    // first main-process acknowledgement that the exact interaction was loaded,
-    // received through permission-show, rendered, and made visible. Announcing
-    // earlier (even at did-finish-load) can strand an unretractable Slack card
-    // when content sync or the renderer fails. Later resize reports are safe:
-    // announceSlackPermission is once-guarded per entry.
-    announceSlackPermission(perm);
-    // Geometry updates happen after the delivery acknowledgement. If either
-    // reflow throws, the already-rendered card must still be announced.
-    repositionBubbles();
-    repositionDependentBubbles();
+function normalizeSurfaceHeightReport(payload) {
+  if (typeof payload === "number") {
+    return {
+      height: payload,
+      surfaceRevision: null,
+      activeEntryId: null,
+      entryIds: null,
+    };
   }
+  if (!payload || typeof payload !== "object") return null;
+  return {
+    height: payload.height,
+    surfaceRevision: Number.isFinite(payload.surfaceRevision) ? payload.surfaceRevision : null,
+    activeEntryId: typeof payload.activeEntryId === "string" ? payload.activeEntryId : null,
+    entryIds: Array.isArray(payload.entryIds)
+      ? payload.entryIds.filter((entryId) => typeof entryId === "string")
+      : null,
+  };
+}
+
+function isSurfaceReportCurrent(report, expectedRevision, expectedActiveEntryId) {
+  if (!report) return false;
+  if (!Number.isFinite(Number(report.height)) || Number(report.height) <= 0) return false;
+  if (report.surfaceRevision !== null && report.surfaceRevision !== expectedRevision) return false;
+  if (report.activeEntryId !== null && report.activeEntryId !== expectedActiveEntryId) return false;
+  return true;
+}
+
+function acknowledgeSurfaceEntries(entryIds) {
+  for (const entryId of entryIds) {
+    const entry = getSurfaceEntryById(entryId);
+    if (!entry || entry.surfaceEligible !== true || isSurfaceEntrySuppressed(entry)) continue;
+    announceSlackPermission(entry);
+  }
+}
+
+function showMeasuredPermissionSurface(win, activeEntry, surfaceRevision, entryIds) {
+  if (!win || win.isDestroyed() || !activeEntry) return false;
+  // The renderer acknowledgement is authoritative even if a subsequent
+  // platform geometry operation fails. Slack is once-guarded per entry.
+  acknowledgeSurfaceEntries(entryIds);
+  repositionBubbles();
+  try {
+    win.showInactive();
+    keepOutOfTaskbar(win);
+  } catch (err) {
+    handleServingSurfaceFailure(win, `Permission bubble failed to show: ${err?.message || String(err)}`);
+    return false;
+  }
+  if (!Number.isFinite(activeEntry.firstActivePresentedAt)) {
+    activeEntry.firstActivePresentedAt = Date.now();
+  }
+  permissionSurface.pendingShowRevision = permissionSurface.pendingShowRevision === surfaceRevision
+    ? null
+    : permissionSurface.pendingShowRevision;
+  if (isMac) deferMacFloatingVisibility(ctx, win);
+  else if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
+  if (getEntryCapabilities(activeEntry).answerQuestions === true && typeof win.focus === "function") {
+    try { win.focus(); } catch {}
+  }
+  repositionDependentBubbles();
+  syncPermissionShortcuts();
+  return true;
+}
+
+function commitPermissionSurfaceHandover(win, report) {
+  const handover = permissionSurface.handover;
+  if (!handover || handover.window !== win) return false;
+  const target = getSurfaceEntryById(handover.toActiveEntryId);
+  if (
+    permissionSurface.activeEntryId !== handover.fromActiveEntryId
+    || !target
+    || !getSurfaceEligibleEntries().includes(target)
+    || getPermissionNativeMode(target) !== handover.nativeMode
+  ) {
+    failPermissionSurfaceHandover(win, "handover state changed before renderer acknowledgement");
+    return false;
+  }
+  if (!isSurfaceReportCurrent(report, handover.surfaceRevision, target.surfaceEntryId)) return false;
+  // The old serving surface may have received a queue-only refresh while the
+  // hidden candidate was loading. Republish the latest queue to the candidate
+  // and wait for its matching acknowledgement before swapping windows.
+  if (handover.surfaceRevision !== permissionSurface.surfaceRevision) {
+    const payload = sendPermissionSurfacePayload(win, target, {
+      activeContentRevision: handover.activeContentRevision,
+    });
+    if (payload) handover.surfaceRevision = payload.surfaceRevision;
+    return false;
+  }
+
+  const oldWindow = permissionSurface.window;
+  const deliveredEntryIds = report.entryIds || getSurfaceEligibleEntries().map((entry) => entry.surfaceEntryId);
+  permissionSurface.handover = null;
+  permissionSurface.window = win;
+  permissionSurface.ready = true;
+  permissionSurface.nativeMode = handover.nativeMode;
+  permissionSurface.activeEntryId = target.surfaceEntryId;
+  permissionSurface.activeContentRevision = handover.activeContentRevision;
+  permissionSurface.measuredHeight = Math.ceil(Number(report.height));
+  permissionSurface.deliveryEntryIds = new Set(deliveredEntryIds);
+  permissionSurface.pendingShowRevision = handover.surfaceRevision;
+  permissionBubbleWindows.add(win);
+
+  clearPermissionSurfaceImeEditing(oldWindow);
+  try { if (oldWindow && !oldWindow.isDestroyed()) oldWindow.hide(); } catch {}
+  if (!showMeasuredPermissionSurface(win, target, handover.surfaceRevision, deliveredEntryIds)) return false;
+
+  if (oldWindow && oldWindow !== win) {
+    permissionSurface.expectedDestroyWindows.add(oldWindow);
+    try { if (!oldWindow.isDestroyed()) oldWindow.destroy(); } catch {}
+  }
+
+  const currentEntryIds = getSurfaceEligibleEntries().map((entry) => entry.surfaceEntryId);
+  if (
+    currentEntryIds.length !== deliveredEntryIds.length
+    || currentEntryIds.some((entryId, index) => entryId !== deliveredEntryIds[index])
+  ) {
+    syncPermissionSurface("handover-queue-refresh");
+  }
+  return true;
+}
+
+function handleBubbleHeight(event, payload) {
+  const senderWin = BrowserWindow.fromWebContents(event.sender);
+  const report = normalizeSurfaceHeightReport(payload);
+  if (!senderWin || !report) return;
+  if (permissionSurface.handover && permissionSurface.handover.window === senderWin) {
+    commitPermissionSurfaceHandover(senderWin, report);
+    return;
+  }
+  if (permissionSurface.window !== senderWin || !permissionSurface.ready) return;
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (!active || !isSurfaceReportCurrent(report, permissionSurface.surfaceRevision, active.surfaceEntryId)) return;
+
+  permissionSurface.measuredHeight = Math.ceil(Number(report.height));
+  const deliveredEntryIds = [...permissionSurface.deliveryEntryIds];
+  // revealCard() reports height on the next animation frame, so this is the
+  // renderer acknowledgement for the entire currently delivered surface.
+  if (permissionSurface.pendingShowRevision === permissionSurface.surfaceRevision) {
+    showMeasuredPermissionSurface(
+      senderWin,
+      active,
+      permissionSurface.surfaceRevision,
+      deliveredEntryIds
+    );
+    return;
+  }
+  acknowledgeSurfaceEntries(deliveredEntryIds);
+  repositionBubbles();
+  repositionDependentBubbles();
 }
 
 // macOS only: while a text input inside the bubble is focused, the bubble must
@@ -2806,14 +3205,21 @@ function handleBubbleHeight(event, height) {
 // through one place (topmost-runtime.js) instead of being hand-rolled twice.
 // The renderer clears the flag on element blur AND on window blur (e.g. Cmd-Tab
 // away mid-composition), so it can't get stuck and strand the bubble.
-function handleImeEditing(event, editing) {
+function handleImeEditing(event, payload) {
   if (!isMac) return;
   const senderWin = BrowserWindow.fromWebContents(event.sender);
-  const perm = pendingPermissions.find(p => p.bubble === senderWin);
-  if (!perm || !perm.bubble || perm.bubble.isDestroyed()) return;
-  const wasEditing = perm.bubble.__clawdMacImeEditing === true;
-  if (editing) perm.bubble.__clawdMacImeEditing = true;
-  else delete perm.bubble.__clawdMacImeEditing;
+  if (!senderWin || permissionSurface.window !== senderWin || senderWin.isDestroyed()) return;
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (!active) return;
+  const isEnvelope = payload && typeof payload === "object";
+  if (isEnvelope) {
+    if (payload.entryId !== active.surfaceEntryId) return;
+    if (payload.activeContentRevision !== permissionSurface.activeContentRevision) return;
+  }
+  const editing = isEnvelope ? payload.editing === true : payload === true;
+  const wasEditing = senderWin.__clawdMacImeEditing === true;
+  if (editing) senderWin.__clawdMacImeEditing = true;
+  else delete senderWin.__clawdMacImeEditing;
   if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
   if (!editing && wasEditing) {
     if (typeof ctx.repositionFloatingBubbles === "function") {
@@ -2841,12 +3247,65 @@ function handleBubbleRendererGone(bubble) {
   if (typeof ctx.reapplyMacVisibility === "function") ctx.reapplyMacVisibility();
 }
 
-function handleDecide(event, behavior) {
-  // Identify which permission this bubble belongs to via sender webContents
+function recoverPermissionSurfaceInteraction() {
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (!active || !permissionSurface.window || !permissionSurface.ready) return;
+  sendPermissionSurfacePayload(permissionSurface.window, active, {
+    restoreInteractionControls: true,
+  });
+}
+
+function getCurrentSurfaceInteraction(event, payload) {
   const senderWin = BrowserWindow.fromWebContents(event.sender);
-  const perm = pendingPermissions.find(p => p.bubble === senderWin);
-  permLog(`IPC permission-decide: behavior=${behavior} matched=${!!perm}`);
-  if (!perm) return;
+  const perm = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (!senderWin || senderWin !== permissionSurface.window || !permissionSurface.ready || !perm) return null;
+  const isEnvelope = payload
+    && typeof payload === "object"
+    && Object.prototype.hasOwnProperty.call(payload, "behavior");
+  if (isEnvelope) {
+    if (payload.entryId !== perm.surfaceEntryId) return null;
+    if (payload.activeContentRevision !== permissionSurface.activeContentRevision) return null;
+  }
+  return {
+    perm,
+    behavior: isEnvelope ? payload.behavior : payload,
+  };
+}
+
+function handleSelect(event, payload) {
+  const senderWin = BrowserWindow.fromWebContents(event.sender);
+  const active = getSurfaceEntryById(permissionSurface.activeEntryId);
+  if (!senderWin || senderWin !== permissionSurface.window || !permissionSurface.ready || !active) return;
+  if (!payload || typeof payload !== "object") {
+    recoverPermissionSurfaceInteraction();
+    return;
+  }
+  const target = getSurfaceEntryById(payload.targetEntryId);
+  const valid = payload.observedActiveEntryId === active.surfaceEntryId
+    && payload.activeContentRevision === permissionSurface.activeContentRevision
+    && target
+    && getSurfaceEligibleEntries().includes(target)
+    && !isSurfaceSwitchingLocked(active);
+  if (!valid) {
+    recoverPermissionSurfaceInteraction();
+    return;
+  }
+  if (target === active) {
+    recoverPermissionSurfaceInteraction();
+    return;
+  }
+  syncPermissionSurface("manual-select", { targetEntry: target });
+}
+
+function handleDecide(event, payload) {
+  const interaction = getCurrentSurfaceInteraction(event, payload);
+  const behaviorForLog = interaction ? interaction.behavior : payload;
+  permLog(`IPC permission-decide: behavior=${String(behaviorForLog)} matched=${!!interaction}`);
+  if (!interaction) {
+    recoverPermissionSurfaceInteraction();
+    return;
+  }
+  const { perm, behavior } = interaction;
   if (perm.isCodexUserInputNotify) {
     dismissPassiveNotify(perm, "ipc-decide");
     if (behavior === "codex-user-input-focus" && !perm.host) {
@@ -3514,6 +3973,40 @@ function clearKimiNotifyBubbles(sessionId, reason = sessionId ? "kimi-session-re
   for (const perm of toRemove) dismissPassiveNotify(perm, reason);
 }
 
+function getPermissionBubbleWindows() {
+  const windows = [];
+  if (permissionSurface.window && !permissionSurface.window.isDestroyed()) {
+    windows.push(permissionSurface.window);
+  }
+  const candidate = permissionSurface.handover?.window;
+  if (candidate && candidate !== permissionSurface.window && !candidate.isDestroyed()) {
+    windows.push(candidate);
+  }
+  return windows;
+}
+
+function getPermissionSurfaceWindow() {
+  return permissionSurface.window && !permissionSurface.window.isDestroyed()
+    ? permissionSurface.window
+    : null;
+}
+
+function setPermissionPetHidden(hidden) {
+  const targetHidden = hidden === true;
+  if (targetHidden === permissionSurface.petHidden) return false;
+  permissionSurface.petHidden = targetHidden;
+  if (targetHidden) {
+    const ordinals = pendingPermissions
+      .filter((entry) => entry?.surfaceEligible === true && Number.isFinite(entry.surfaceOrdinal))
+      .map((entry) => entry.surfaceOrdinal);
+    permissionSurface.petHiddenCutoffOrdinal = ordinals.length ? Math.max(...ordinals) : null;
+  } else {
+    permissionSurface.petHiddenCutoffOrdinal = null;
+  }
+  syncPermissionSurface(targetHidden ? "pet-hidden" : "pet-shown");
+  return true;
+}
+
 function cleanup() {
   // Unregister hotkeys
   if (registeredAllowAccel !== null) {
@@ -3531,13 +4024,33 @@ function cleanup() {
   // behalf. Each protocol gets its normal no-decision fallback: bodyless
   // replies for supported hooks, socket close for Claude/CodeBuddy, and no
   // bridge reply for opencode-family requests.
-  for (const perm of [...pendingPermissions]) {
-    if (perm._delayTimer) clearTimeout(perm._delayTimer);
-    if (perm.autoExpireTimer) clearTimeout(perm.autoExpireTimer);
-    if (isPassiveNotifyEntry(perm)) dismissPassiveNotify(perm, "Clawd is quitting");
-    else dismissInteractivePermissionWithoutDecision(perm, "Clawd is quitting");
+  surfaceFailureSweepActive = true;
+  try {
+    for (const perm of [...pendingPermissions]) {
+      if (perm._delayTimer) clearTimeout(perm._delayTimer);
+      if (perm.autoExpireTimer) clearTimeout(perm.autoExpireTimer);
+      if (isPassiveNotifyEntry(perm)) dismissPassiveNotify(perm, "Clawd is quitting");
+      else dismissInteractivePermissionWithoutDecision(perm, "Clawd is quitting");
+    }
+  } finally {
+    surfaceFailureSweepActive = false;
+  }
+  if (permissionSurface.hideTimer) {
+    clearTimeout(permissionSurface.hideTimer);
+    permissionSurface.hideTimer = null;
+  }
+  for (const bubble of getPermissionBubbleWindows()) {
+    permissionSurface.expectedDestroyWindows.add(bubble);
+    try { bubble.destroy(); } catch {}
   }
   permissionBubbleWindows.clear();
+  permissionSurface.window = null;
+  permissionSurface.handover = null;
+  permissionSurface.ready = false;
+  permissionSurface.nativeMode = null;
+  permissionSurface.activeEntryId = null;
+  permissionSurface.measuredHeight = 0;
+  permissionSurface.deliveryEntryIds = new Set();
 }
 
 return {
@@ -3548,13 +4061,14 @@ return {
   addPendingPermission, removePendingPermission,
   isPermissionEntryLive, canAutoResolvePendingPermission,
   beginSessionTrustConfirmation, endSessionTrustConfirmation,
-  syncPermissionBubbleContent,
+  syncPermissionBubbleContent, refreshPermissionEntry,
   maybeStartRemoteApproval,
   dismissPermissionForTerminal,
   // Test seam: lets wire-level tests pin which provenance flags reach the
   // renderer (isHermes suppresses the go-to-terminal action — issue #689).
   buildPermissionBubblePayload,
-  handleBubbleHeight, handleDecide, handleImeEditing, handleBubbleRendererGone, cleanup,
+  handleBubbleHeight, handleDecide, handleSelect, handleImeEditing, handleBubbleRendererGone, cleanup,
+  getPermissionBubbleWindows, getPermissionSurfaceWindow, setPermissionPetHidden,
   showCodexNotifyBubble, clearCodexNotifyBubbles,
   showCodexUserInputBubble, clearCodexUserInputBubbles,
   showKimiNotifyBubble, clearKimiNotifyBubbles,
@@ -3592,4 +4106,5 @@ module.exports.__test = {
   remapIndexedElicitationAnswers,
   validateAndRemapIndexedElicitationAnswers,
   collectVisibleWindowBounds,
+  computePermissionBubbleWidth,
 };

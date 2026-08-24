@@ -138,7 +138,7 @@ describe("bubble-renderer family contract (static)", () => {
     assert.match(branch, /detail = input\.url;/);
     assert.match(branch, /Array\.isArray\(data\.familyPatterns\) && data\.familyPatterns\.length/);
     assert.match(branch, /detail = \[\.\.\.new Set\(data\.familyPatterns\)\]\.join\(", "\);/);
-    assert.match(branch, /commandBlock\.textContent = truncate\(detail, 200\);/);
+    assert.match(branch, /commandBlock\.textContent = truncate\(detail, ACTIVE_DETAIL_MAX_LENGTH\);/);
   });
 
   it("wires the Always button: candidates gate, {agent} tooltip vars, family-always decide", () => {

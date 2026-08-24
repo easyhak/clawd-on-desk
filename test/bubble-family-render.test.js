@@ -62,6 +62,7 @@ function fakeEl(tag = "div") {
 function makeRenderer() {
   const byId = new Map();
   const decideCalls = [];
+  const selectCalls = [];
   const captured = { show: null, hide: null };
 
   const documentStub = {
@@ -82,6 +83,7 @@ function makeRenderer() {
       onPermissionShow(fn) { captured.show = fn; },
       onPermissionHide(fn) { captured.hide = fn; },
       decide(behavior) { decideCalls.push(behavior); },
+      select(entryId) { selectCalls.push(entryId); },
       reportHeight() {},
       setImeEditing() {},
     },
@@ -107,6 +109,7 @@ function makeRenderer() {
   return {
     show: captured.show,
     decideCalls,
+    selectCalls,
     el: (id) => byId.get(id) || fakeEl(),
   };
 }
@@ -229,5 +232,77 @@ describe("bubble-renderer family branch (executed)", () => {
     const r = makeRenderer();
     r.show(familyPayload({ familyDisplayName: null }));
     assert.ok(r.el("suggestions").children[0].title.includes("opencode"));
+  });
+});
+
+describe("bubble-renderer shared queue envelope (executed)", () => {
+  function envelope(active, overrides = {}) {
+    return {
+      surfaceRevision: 1,
+      activeContentRevision: 1,
+      activeEntryId: "entry-a",
+      active,
+      queue: [],
+      entryIds: ["entry-a"],
+      totalCount: 1,
+      activeIndex: 0,
+      switchingLocked: false,
+      restoreInteractionControls: false,
+      measureCeiling: 1600,
+      ...overrides,
+    };
+  }
+
+  it("renders two preview rows plus a complete drawer and routes row selection", () => {
+    const r = makeRenderer();
+    const active = familyPayload();
+    r.show(envelope(active, {
+      queue: [
+        { entryId: "entry-b", toolLabel: "Read", sessionLabel: "repo", summary: "a.txt" },
+        { entryId: "entry-c", toolLabel: "Bash", sessionLabel: "repo", summary: "npm test" },
+        { entryId: "entry-d", toolLabel: "Write", sessionLabel: "docs", summary: "plan.md" },
+      ],
+      entryIds: ["entry-a", "entry-b", "entry-c", "entry-d"],
+      totalCount: 4,
+    }));
+
+    assert.strictEqual(r.el("queuePreview").children.length, 2);
+    assert.strictEqual(r.el("queueDrawer").children.length, 3);
+    assert.strictEqual(r.el("queueMore").style.display, "");
+    r.el("queuePreview").children[0].click();
+    assert.deepStrictEqual(r.selectCalls, ["entry-b"]);
+  });
+
+  it("keeps queue-only updates from resetting the active detail", () => {
+    const r = makeRenderer();
+    const active = familyPayload({ toolInput: { command: "first" } });
+    r.show(envelope(active));
+    r.el("commandBlock").textContent = "draft sentinel";
+
+    r.show(envelope(active, {
+      surfaceRevision: 2,
+      queue: [{ entryId: "entry-b", toolLabel: "Read", sessionLabel: "repo", summary: "b.txt" }],
+      entryIds: ["entry-a", "entry-b"],
+      totalCount: 2,
+    }));
+
+    assert.strictEqual(r.el("commandBlock").textContent, "draft sentinel");
+    assert.strictEqual(r.el("queuePreview").children.length, 1);
+  });
+
+  it("disables switching and explains the lock while the active card owns input", () => {
+    const r = makeRenderer();
+    r.show(envelope(familyPayload(), {
+      switchingLocked: true,
+      queue: [{ entryId: "entry-b", toolLabel: "Bash", sessionLabel: "repo", summary: "queued" }],
+      entryIds: ["entry-a", "entry-b"],
+      totalCount: 2,
+    }));
+
+    const row = r.el("queuePreview").children[0];
+    assert.strictEqual(row.disabled, true);
+    row.click();
+    assert.deepStrictEqual(r.selectCalls, []);
+    assert.match(r.el("queueLockHint").textContent, /Finish the current input/);
   });
 });

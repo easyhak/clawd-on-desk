@@ -57,20 +57,24 @@ test("permission IPC registers owned channels, delegates, and disposes", () => {
     permission: {
       handleBubbleHeight: (event, height) => calls.push(["height", event.sender, height]),
       handleDecide: (event, behavior) => calls.push(["decide", event.sender, behavior]),
+      handleSelect: (event, selection) => calls.push(["select", event.sender, selection]),
     },
   });
 
   assert.deepStrictEqual([...ipcMain.listeners.keys()].sort(), [
     "bubble-height",
     "permission-decide",
+    "permission-select",
   ]);
 
   ipcMain.send("bubble-height", 240);
   ipcMain.send("permission-decide", "deny-and-focus");
+  ipcMain.send("permission-select", { targetEntryId: "entry-2" });
 
   assert.deepStrictEqual(calls, [
     ["height", "sender-web-contents", 240],
     ["decide", "sender-web-contents", "deny-and-focus"],
+    ["select", "sender-web-contents", { targetEntryId: "entry-2" }],
   ]);
 
   runtime.dispose();

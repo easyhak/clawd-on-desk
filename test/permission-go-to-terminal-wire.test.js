@@ -21,8 +21,38 @@ const Module = require("node:module");
 
 // ── Mock electron before requiring permission.js (same seam as
 // permission-plan-feedback.test.js) ──
+class FakePermissionWindow {
+  constructor() {
+    this.destroyed = false;
+    this.visible = false;
+    this.listeners = new Map();
+    this.sentEvents = [];
+    this.webContents = {
+      once: (name, listener) => this.listeners.set(name, listener),
+      on: (name, listener) => this.listeners.set(name, listener),
+      send: (...args) => this.sentEvents.push(args),
+      isDestroyed: () => this.destroyed,
+    };
+  }
+  static fromWebContents(sender) { return sender && sender.__win ? sender.__win : null; }
+  setAlwaysOnTop() {}
+  setBounds(bounds) { this.bounds = bounds; }
+  getBounds() { return this.bounds || { x: 0, y: 0, width: 420, height: 240 }; }
+  setSkipTaskbar() {}
+  showInactive() { this.visible = true; }
+  hide() { this.visible = false; }
+  isVisible() { return this.visible; }
+  isDestroyed() { return this.destroyed; }
+  on(name, listener) { this.listeners.set(name, listener); }
+  loadFile() { this.listeners.get("did-finish-load")?.(); }
+  destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
+    this.listeners.get("closed")?.();
+  }
+}
 const __electronMock = {
-  BrowserWindow: { fromWebContents: (sender) => (sender && sender.__win) || null },
+  BrowserWindow: FakePermissionWindow,
   globalShortcut: {
     register: () => {}, unregister: () => {}, unregisterAll: () => {}, isRegistered: () => false,
   },
@@ -91,7 +121,7 @@ function makeCtx(overrides = {}) {
     updateDebugLog: null,
     sessionDebugLog: null,
     repositionUpdateBubble: () => {},
-    win: null,
+    win: { isDestroyed: () => false },
     bubbleFollowPet: false,
     petHidden: false,
     doNotDisturb: false,
@@ -115,6 +145,20 @@ function makeFakeBubble() {
 }
 function makeEventFor(bubble) {
   return { sender: { __win: bubble } };
+}
+
+function presentPermission(perm, entry) {
+  perm.addPendingPermission(entry, "test-present");
+  perm.showPermissionBubble(entry);
+  const surface = perm.getPermissionSurfaceWindow();
+  const envelope = [...surface.sentEvents].reverse().find(([name]) => name === "permission-show")[1];
+  perm.handleBubbleHeight(makeEventFor(surface), {
+    height: 240,
+    surfaceRevision: envelope.surfaceRevision,
+    activeEntryId: envelope.activeEntryId,
+    entryIds: envelope.entryIds,
+  });
+  return makeEventFor(surface);
 }
 
 function makePermEntry(res, overrides = {}) {
@@ -143,11 +187,10 @@ describe("go-to-terminal wire semantics (issue #689)", () => {
     const { pendingPermissions, handleDecide } = perm;
 
     const res = createMockResponse();
-    const bubble = makeFakeBubble();
-    const permEntry = makePermEntry(res, { bubble });
-    pendingPermissions.push(permEntry);
+    const permEntry = makePermEntry(res);
+    const event = presentPermission(perm, permEntry);
 
-    handleDecide(makeEventFor(bubble), "deny-and-focus");
+    handleDecide(event, "deny-and-focus");
 
     // Dropped, not parked; empty, not denied.
     assert.strictEqual(res.destroyed, true, "hook socket must be destroyed immediately");
@@ -167,12 +210,11 @@ describe("go-to-terminal wire semantics (issue #689)", () => {
     const { pendingPermissions, handleDecide } = perm;
 
     const res = createMockResponse();
-    const bubble = makeFakeBubble();
-    const permEntry = makePermEntry(res, { bubble });
-    pendingPermissions.push(permEntry);
+    const permEntry = makePermEntry(res);
+    const event = presentPermission(perm, permEntry);
 
-    handleDecide(makeEventFor(bubble), "deny-and-focus");
-    handleDecide(makeEventFor(bubble), "deny-and-focus");
+    handleDecide(event, "deny-and-focus");
+    handleDecide(event, "deny-and-focus");
 
     assert.strictEqual(ctx.focusTerminalCalls.length, 1, "second IPC must not focus again");
     assert.strictEqual(pendingPermissions.length, 0);
@@ -183,9 +225,7 @@ describe("go-to-terminal wire semantics (issue #689)", () => {
       const ctx = makeCtx();
       const perm = initPermission(ctx);
       const { pendingPermissions, handleDecide } = perm;
-      const bubble = makeFakeBubble();
       const permEntry = makePermEntry(createMockResponse(), {
-        bubble,
         agentId,
         familyRequestId: `per_${agentId}`,
         familyBridgeUrl: "http://127.0.0.1:1/reply",
@@ -193,9 +233,7 @@ describe("go-to-terminal wire semantics (issue #689)", () => {
         toolName: "bash",
       });
       permEntry.res = null;
-      pendingPermissions.push(permEntry);
-
-      handleDecide(makeEventFor(bubble), "deny-and-focus");
+      handleDecide(presentPermission(perm, permEntry), "deny-and-focus");
 
       assert.strictEqual(pendingPermissions.indexOf(permEntry), -1, "entry must be removed");
       assert.strictEqual(ctx.focusTerminalCalls.length, 1);
@@ -223,14 +261,12 @@ describe("go-to-terminal wire semantics (issue #689)", () => {
     const { pendingPermissions, handleDecide } = perm;
 
     const res = createMockResponse();
-    const bubble = makeFakeBubble();
-    const permEntry = makePermEntry(res, { bubble, isHermes: true });
-    pendingPermissions.push(permEntry);
+    const permEntry = makePermEntry(res, { isHermes: true });
 
     // No UI offers this on Hermes cards anymore; if it ever arrives anyway
     // (legacy renderer, future regression), the answer must stay a bodyless
     // no-decision — a deny here would decide on the user's behalf.
-    handleDecide(makeEventFor(bubble), "deny-and-focus");
+    handleDecide(presentPermission(perm, permEntry), "deny-and-focus");
 
     assert.strictEqual(res.captured.statusCode, 204, "must answer 204 no-decision");
     const body = res.captured.body || "";

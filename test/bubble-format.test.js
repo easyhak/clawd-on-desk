@@ -3,7 +3,14 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
 
-const { formatDetail, formatAntigravityDetail, truncate, firstStringValue, parseMcpToolName } = require("../src/bubble-format");
+const {
+  formatDetail,
+  formatAntigravityDetail,
+  truncate,
+  firstStringValue,
+  parseMcpToolName,
+  isIrreversibleScanPartial,
+} = require("../src/bubble-format");
 
 describe("bubble-format truncate", () => {
   it("returns input unchanged when within max", () => {
@@ -197,5 +204,29 @@ describe("bubble-format parseMcpToolName (issue #445)", () => {
     ]) {
       assert.strictEqual(parseMcpToolName(bad), null, `${JSON.stringify(bad)} must be raw fallback (null)`);
     }
+  });
+});
+
+describe("bubble-format shared-surface length budgets", () => {
+  it("uses caller-owned active and queue limits through the same formatter", () => {
+    const command = `${"a".repeat(5000)}TAIL`;
+    const active = formatDetail("Bash", { command }, {
+      maxLength: 64 * 1024,
+      fallbackMaxLength: 4 * 1024,
+    });
+    const queue = formatDetail("Bash", { command }, {
+      maxLength: 140,
+      fallbackMaxLength: 140,
+    });
+
+    assert.ok(active.endsWith("TAIL"), "active detail should retain the long command tail");
+    assert.strictEqual(queue.length, 140);
+    assert.ok(queue.endsWith("…"));
+  });
+
+  it("marks shell detail beyond the fixed 4 KB irreversible scan coverage", () => {
+    assert.strictEqual(isIrreversibleScanPartial("Bash", { command: "a".repeat(4096) }), false);
+    assert.strictEqual(isIrreversibleScanPartial("Bash", { command: "a".repeat(4097) }), true);
+    assert.strictEqual(isIrreversibleScanPartial("Read", { command: "a".repeat(5000) }), false);
   });
 });

@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const Module = require("node:module");
 const { describe, it } = require("node:test");
+const { classifyPermissionInteraction } = require("../src/permission-automation-policy");
 
 // ── Mock electron before requiring permission.js ──
 // permission.js does `const { BrowserWindow, globalShortcut } = require("electron")`
@@ -12,8 +13,31 @@ const { describe, it } = require("node:test");
 // to map the IPC sender back to its perm entry. The test runtime's
 // require("electron") returns a path string (no BrowserWindow), so mock it: a
 // sender resolves to its window via a `__win` sentinel.
+class FakeBrowserWindow {
+  constructor() {
+    this.destroyed = false;
+    this.visible = false;
+    this.listeners = new Map();
+    this.webContents = {
+      once: (event, listener) => this.listeners.set(event, listener),
+      on: (event, listener) => this.listeners.set(event, listener),
+      send() {},
+    };
+  }
+  static fromWebContents(sender) { return (sender && sender.__win) || null; }
+  setAlwaysOnTop() {}
+  setBounds() {}
+  setSkipTaskbar() {}
+  showInactive() { this.visible = true; }
+  hide() { this.visible = false; }
+  isVisible() { return this.visible; }
+  isDestroyed() { return this.destroyed; }
+  on(event, listener) { this.listeners.set(event, listener); }
+  loadFile() { this.listeners.get("did-finish-load")?.(); }
+  destroy() { this.destroyed = true; this.listeners.get("closed")?.(); }
+}
 const __electronMock = {
-  BrowserWindow: { fromWebContents: (sender) => (sender && sender.__win) || null },
+  BrowserWindow: FakeBrowserWindow,
   globalShortcut: {
     register: () => {}, unregister: () => {}, unregisterAll: () => {}, isRegistered: () => false,
   },
@@ -104,6 +128,26 @@ function eventFor(bubble) {
   return { sender: { __win: bubble } };
 }
 
+function presentTextSurface(api) {
+  const entry = {
+    sessionId: "claude-ime",
+    agentId: "claude-code",
+    toolName: "AskUserQuestion",
+    toolInput: { questions: [] },
+    suggestions: [],
+    createdAt: Date.now(),
+    isElicitation: true,
+    interaction: classifyPermissionInteraction({
+      agentId: "claude-code",
+      eventKind: "elicitation",
+      toolName: "AskUserQuestion",
+    }),
+  };
+  api.pendingPermissions.push(entry);
+  api.showPermissionBubble(entry);
+  return api.getPermissionSurfaceWindow();
+}
+
 describe("handleImeEditing (macOS)", () => {
   it("sets the flag on focus and clears it on blur, reapplying each time", macOnly, () => {
     const calls = [];
@@ -112,10 +156,9 @@ describe("handleImeEditing (macOS)", () => {
       () => calls.push("reposition"),
       () => calls.push("dodge")
     );
-    const { handleImeEditing, pendingPermissions } = initPermission(ctx);
-
-    const bubble = makeBubble();
-    pendingPermissions.push({ bubble });
+    const api = initPermission(ctx);
+    const { handleImeEditing } = api;
+    const bubble = presentTextSurface(api);
 
     handleImeEditing(eventFor(bubble), true);
     assert.strictEqual(bubble.__clawdMacImeEditing, true);
@@ -136,8 +179,9 @@ describe("handleImeEditing (macOS)", () => {
   it("ignores a sender that matches no pending permission", macOnly, () => {
     const reapply = [];
     const ctx = makeCtx(() => reapply.push(true));
-    const { handleImeEditing, pendingPermissions } = initPermission(ctx);
-    pendingPermissions.push({ bubble: makeBubble() });
+    const api = initPermission(ctx);
+    const { handleImeEditing } = api;
+    presentTextSurface(api);
 
     handleImeEditing(eventFor(makeBubble()), true); // different, unmatched window
     assert.strictEqual(reapply.length, 0);
@@ -146,9 +190,10 @@ describe("handleImeEditing (macOS)", () => {
   it("ignores a destroyed bubble instead of touching it", macOnly, () => {
     const reapply = [];
     const ctx = makeCtx(() => reapply.push(true));
-    const { handleImeEditing, pendingPermissions } = initPermission(ctx);
-    const bubble = makeBubble({ isDestroyed: () => true });
-    pendingPermissions.push({ bubble });
+    const api = initPermission(ctx);
+    const { handleImeEditing } = api;
+    const bubble = presentTextSurface(api);
+    bubble.destroyed = true;
 
     handleImeEditing(eventFor(bubble), true);
     assert.strictEqual(bubble.__clawdMacImeEditing, undefined);

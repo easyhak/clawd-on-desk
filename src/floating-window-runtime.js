@@ -13,6 +13,11 @@ function getPendingList(getPendingPermissions) {
 
 function createFloatingWindowRuntime(options = {}) {
   const getPendingPermissions = options.getPendingPermissions || (() => []);
+  const getPermissionBubbleWindows = options.getPermissionBubbleWindows || (() => (
+    getPendingList(getPendingPermissions).map((entry) => entry && entry.bubble).filter(Boolean)
+  ));
+  const ownsSharedPermissionSurface = typeof options.setPermissionPetHidden === "function";
+  const setPermissionPetHidden = options.setPermissionPetHidden || (() => false);
   const keepOutOfTaskbar = options.keepOutOfTaskbar || noop;
   const repositionPermissionBubbles = options.repositionPermissionBubbles || noop;
   const repositionUpdateBubble = options.repositionUpdateBubble || noop;
@@ -23,7 +28,7 @@ function createFloatingWindowRuntime(options = {}) {
   const hideUpdateBubble = options.hideUpdateBubble || noop;
 
   function repositionFloatingBubbles() {
-    if (getPendingList(getPendingPermissions).length) repositionPermissionBubbles();
+    if (getPermissionBubbleWindows().length) repositionPermissionBubbles();
     repositionUpdateBubble();
     // Orbit reads both permission and update-bubble bounds. Reposition it last
     // so it never avoids the previous update-bubble position.
@@ -41,19 +46,25 @@ function createFloatingWindowRuntime(options = {}) {
   }
 
   function showFloatingSurfacesForPet() {
-    for (const perm of getPendingList(getPendingPermissions)) {
-      const bubble = perm && perm.bubble;
-      if (isLiveWindow(bubble) && typeof bubble.showInactive === "function") {
-        bubble.showInactive();
-        keepOutOfTaskbar(bubble);
+    // The permission runtime republishes the shared surface and reveals it
+    // only after the renderer acknowledges the new payload height.
+    setPermissionPetHidden(false);
+    if (!ownsSharedPermissionSurface) {
+      for (const bubble of getPermissionBubbleWindows()) {
+        if (isLiveWindow(bubble) && typeof bubble.showInactive === "function") {
+          bubble.showInactive();
+          keepOutOfTaskbar(bubble);
+        }
       }
     }
     syncUpdateBubbleVisibility();
   }
 
   function hideFloatingSurfacesForPet() {
-    for (const perm of getPendingList(getPendingPermissions)) {
-      const bubble = perm && perm.bubble;
+    // Record the cutoff before hiding any window. Requests that arrive after
+    // this point are intentionally allowed to surface while the pet is hidden.
+    setPermissionPetHidden(true);
+    for (const bubble of getPermissionBubbleWindows()) {
       if (isLiveWindow(bubble) && typeof bubble.hide === "function") {
         bubble.hide();
       }

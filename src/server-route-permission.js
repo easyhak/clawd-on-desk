@@ -1385,9 +1385,6 @@ function handlePermissionPost(req, res, options) {
         // failure leaves nothing behind.
         const rollbackZcodePermission = (reason) => {
           removePendingPermission(ctx, permEntry, reason);
-          if (permEntry.bubble) {
-            try { permEntry.bubble.destroy(); } catch {}
-          }
           if (permEntry.hideTimer) {
             try { clearTimeout(permEntry.hideTimer); } catch {}
           }
@@ -1680,10 +1677,6 @@ function handlePermissionPost(req, res, options) {
 
         const rollbackDshPermission = (reason) => {
           removePendingPermission(ctx, permEntry, reason);
-          if (permEntry.bubble && !permEntry.bubble.isDestroyed()) {
-            try { permEntry.bubble.destroy(); } catch {}
-          }
-          permEntry.bubble = null;
           if (permEntry.autoCloseTimer) {
             try { clearTimeout(permEntry.autoCloseTimer); } catch {}
             permEntry.autoCloseTimer = null;
@@ -1835,10 +1828,6 @@ function handlePermissionPost(req, res, options) {
             if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
             if (permEntry.autoCloseTimer) { clearTimeout(permEntry.autoCloseTimer); permEntry.autoCloseTimer = null; }
             if (permEntry.hideTimer) { clearTimeout(permEntry.hideTimer); permEntry.hideTimer = null; }
-            if (permEntry.bubble && !permEntry.bubble.isDestroyed()) {
-              try { permEntry.bubble.destroy(); } catch {}
-            }
-            permEntry.bubble = null;
             sendHermesPermissionNoDecision(res);
             return;
           }
@@ -1901,10 +1890,6 @@ function handlePermissionPost(req, res, options) {
           if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
           if (permEntry.autoCloseTimer) { clearTimeout(permEntry.autoCloseTimer); permEntry.autoCloseTimer = null; }
           if (permEntry.hideTimer) { clearTimeout(permEntry.hideTimer); permEntry.hideTimer = null; }
-          if (permEntry.bubble && !permEntry.bubble.isDestroyed()) {
-            try { permEntry.bubble.destroy(); } catch {}
-          }
-          permEntry.bubble = null;
           sendHermesPermissionNoDecision(res);
         }
         return;
@@ -2097,10 +2082,6 @@ function handlePermissionPost(req, res, options) {
           if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
           if (permEntry.autoCloseTimer) { clearTimeout(permEntry.autoCloseTimer); permEntry.autoCloseTimer = null; }
           if (permEntry.hideTimer) { clearTimeout(permEntry.hideTimer); permEntry.hideTimer = null; }
-          if (permEntry.bubble && !permEntry.bubble.isDestroyed()) {
-            try { permEntry.bubble.destroy(); } catch {}
-          }
-          permEntry.bubble = null;
           ctx.sendPermissionResponse(res, "deny", "Elicitation bubble unavailable; answer in terminal", "Elicitation");
           return;
         }
@@ -2161,19 +2142,13 @@ function handlePermissionPost(req, res, options) {
         // abortHandler only fires on res close. Pop the entry explicitly and
         // destroy the socket so CC falls back to its built-in chat prompt
         // (non-blocking error per hooks doc) instead of hanging on a stale
-        // bubble that was never visible. showPermissionBubble assigns
-        // permEntry.bubble before loadFile/showInactive/reposition, so a
-        // throw after that point leaves a partially-constructed window —
-        // tear it down along with any timers we've armed.
+        // bubble that was never visible. The permission runtime owns its
+        // shared surface, so rollback removes only this failed entry.
         ctx.permLog(`bubble failed: ${bubbleErr && bubbleErr.message} -> drop connection, chat fallback`);
         removePendingPermission(ctx, permEntry, "bubble-failed");
         if (permEntry.abortHandler) res.removeListener("close", permEntry.abortHandler);
         if (permEntry.autoCloseTimer) { clearTimeout(permEntry.autoCloseTimer); permEntry.autoCloseTimer = null; }
         if (permEntry.hideTimer) { clearTimeout(permEntry.hideTimer); permEntry.hideTimer = null; }
-        if (permEntry.bubble && !permEntry.bubble.isDestroyed()) {
-          try { permEntry.bubble.destroy(); } catch {}
-        }
-        permEntry.bubble = null;
         try { res.destroy(); } catch {}
         return;
       }

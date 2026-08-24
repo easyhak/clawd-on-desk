@@ -1,13 +1,13 @@
 "use strict";
 
-// Partial-create rollback for showPermissionBubble: a synchronous throw after
-// the BrowserWindow exists (platform APIs, shortcut sync, autoclose arming)
-// must destroy the window instead of orphaning it with live close handlers
-// while the route-level catch drops the pending entry.
+// Shared-surface rollback: a platform throw after renderer acknowledgement
+// drains only the delivered entry and destroys the failed serving surface.
 
 const { describe, it } = require("node:test");
 const assert = require("node:assert");
 const Module = require("module");
+const fs = require("node:fs");
+const path = require("node:path");
 
 const PERMISSION_MODULE_PATH = require.resolve("../src/permission");
 const { classifyPermissionInteraction } = require("../src/permission-automation-policy");
@@ -50,7 +50,10 @@ function createRollbackHarness({ throwAt }) {
     }
     showInactive() {
       if (throwAt === "showInactive") throw new Error("showInactive boom");
+      this.visible = true;
     }
+    hide() { this.visible = false; }
+    isVisible() { return this.visible === true; }
     setSkipTaskbar() {}
     on(event, cb) {
       if (event === "closed") this._closedHandler = cb;
@@ -64,7 +67,7 @@ function createRollbackHarness({ throwAt }) {
 
   const fakeElectron = {
     BrowserWindow: Object.assign(FakeBrowserWindow, {
-      fromWebContents() { return null; },
+      fromWebContents(sender) { return sender && sender.__window || null; },
     }),
     globalShortcut: {
       register() { return true; },
@@ -115,18 +118,31 @@ function makeZcodeEntry(api) {
 }
 
 describe("showPermissionBubble partial-create rollback", () => {
-  it("destroys the window and rethrows when a post-create step throws", () => {
+  it("never destroys a shared surface from one route entry's rollback", () => {
+    const routeSource = fs.readFileSync(
+      path.join(__dirname, "..", "src", "server-route-permission.js"),
+      "utf8"
+    );
+
+    assert.doesNotMatch(routeSource, /permEntry\.bubble\.destroy\s*\(/);
+  });
+
+  it("destroys the serving surface and releases its entry when reveal throws", () => {
     const { api, createdWindows } = createRollbackHarness({ throwAt: "showInactive" });
     const entry = makeZcodeEntry(api);
 
-    assert.throws(() => api.showPermissionBubble(entry), /showInactive boom/);
+    assert.doesNotThrow(() => api.showPermissionBubble(entry));
+    const surface = api.getPermissionSurfaceWindow();
+    assert.ok(surface);
+    assert.doesNotThrow(() => {
+      api.handleBubbleHeight({ sender: { __window: surface } }, 180);
+    });
 
     // The window was torn down — no orphaned BrowserWindow with live handlers.
     assert.strictEqual(createdWindows.length, 1);
     assert.strictEqual(createdWindows[0].destroyed, true);
-    // The entry no longer points at the destroyed window; the route-level
-    // catch owns removing it from pendingPermissions and answering 204.
-    assert.strictEqual(entry.bubble, null);
+    assert.strictEqual(api.pendingPermissions.length, 0);
+    assert.strictEqual(api.getPermissionSurfaceWindow(), null);
   });
 
   it("leaves no window behind when nothing throws (control)", () => {
@@ -137,6 +153,7 @@ describe("showPermissionBubble partial-create rollback", () => {
 
     assert.strictEqual(createdWindows.length, 1);
     assert.strictEqual(createdWindows[0].destroyed, false);
-    assert.strictEqual(entry.bubble, createdWindows[0]);
+    assert.strictEqual(api.getPermissionSurfaceWindow(), createdWindows[0]);
+    assert.strictEqual(createdWindows[0].visible, undefined, "surface stays hidden before height acknowledgement");
   });
 });
