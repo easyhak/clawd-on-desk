@@ -746,8 +746,7 @@ function loadSharedLanguagePickerForTest({
   transitionDuration = "0.14s",
   transitionDelay = "0s",
   lockWhilePending = false,
-  positionStrategy = "anchored",
-  placementPreference = "auto",
+  viewportPlacement = null,
   innerWidth = 1000,
 } = {}) {
   const body = new FakeElement("body");
@@ -837,8 +836,7 @@ function loadSharedLanguagePickerForTest({
     ariaLabel: "Language",
     onChange,
     lockWhilePending,
-    positionStrategy,
-    placementPreference,
+    viewportPlacement,
   });
   boundary.appendChild(control.element);
 
@@ -9558,8 +9556,7 @@ describe("settings renderer browser environment", () => {
     for (const scale of [1, 1.25, 1.5, 1.6]) {
       const tint = loadSharedLanguagePickerForTest({
         options: ["none", "midnight", "gold", "vaporwave", "matcha", "mono"],
-        positionStrategy: "viewport-fixed",
-        placementPreference: "down",
+        viewportPlacement: "down",
       });
       tint.boundary.getBoundingClientRect = () => ({
         top: 38, bottom: 690, left: 250, right: 982,
@@ -9582,8 +9579,7 @@ describe("settings renderer browser environment", () => {
 
       const accessory = loadSharedLanguagePickerForTest({
         options: ["none", "cowboy", "party", "wizard", "top", "santa", "pumpkin", "halo"],
-        positionStrategy: "viewport-fixed",
-        placementPreference: "up",
+        viewportPlacement: "up",
       });
       accessory.boundary.getBoundingClientRect = tint.boundary.getBoundingClientRect;
       accessory.trigger.getBoundingClientRect = () => ({
@@ -9604,8 +9600,7 @@ describe("settings renderer browser environment", () => {
 
   it("falls back from a preferred theme-menu direction only when the other side is safer", () => {
     const preferDown = loadSharedLanguagePickerForTest({
-      positionStrategy: "viewport-fixed",
-      placementPreference: "down",
+      viewportPlacement: "down",
       innerHeight: 280,
     });
     preferDown.boundary.getBoundingClientRect = () => ({ top: 0, bottom: 280, left: 0, right: 500 });
@@ -9620,8 +9615,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(parseInt(preferDown.menu.style.top, 10) >= 12);
 
     const preferUp = loadSharedLanguagePickerForTest({
-      positionStrategy: "viewport-fixed",
-      placementPreference: "up",
+      viewportPlacement: "up",
       innerHeight: 280,
     });
     preferUp.boundary.getBoundingClientRect = preferDown.boundary.getBoundingClientRect;
@@ -9639,8 +9633,7 @@ describe("settings renderer browser environment", () => {
   it("keeps outer overflow stable across repeated fixed-menu opens and closes", () => {
     const harness = loadSharedLanguagePickerForTest({
       options: ["none", "cowboy", "party", "wizard", "top", "santa", "pumpkin", "halo"],
-      positionStrategy: "viewport-fixed",
-      placementPreference: "up",
+      viewportPlacement: "up",
     });
     harness.boundary.getBoundingClientRect = () => ({ top: 0, bottom: 600, left: 250, right: 982 });
     const triggerRect = {

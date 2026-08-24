@@ -18,17 +18,15 @@
   function createLanguagePicker(config = {}) {
     const options = normalizeOptions(config.options);
     const ariaLabel = config.ariaLabel == null ? "" : String(config.ariaLabel);
-    const positionStrategy = config.positionStrategy === "viewport-fixed"
-      ? "viewport-fixed"
-      : "anchored";
-    const placementPreference = config.placementPreference === "up"
-      || config.placementPreference === "down"
-      ? config.placementPreference
-      : "auto";
+    const viewportPlacement = config.viewportPlacement === "up"
+      || config.viewportPlacement === "down"
+      ? config.viewportPlacement
+      : null;
+    const usesViewportPlacement = viewportPlacement !== null;
     const picker = document.createElement("div");
     const extraClassName = config.className == null ? "" : String(config.className).trim();
     picker.className = `language-picker${extraClassName ? ` ${extraClassName}` : ""}`;
-    picker.classList.toggle("viewport-fixed", positionStrategy === "viewport-fixed");
+    picker.classList.toggle("viewport-fixed", usesViewportPlacement);
 
     const trigger = document.createElement("button");
     trigger.type = "button";
@@ -189,7 +187,7 @@
           right = right == null ? boundaryRight : Math.min(right, boundaryRight);
         }
       }
-      if (positionStrategy === "viewport-fixed") {
+      if (usesViewportPlacement) {
         top += VIEWPORT_EDGE_INSET_PX;
         bottom -= VIEWPORT_EDGE_INSET_PX;
         left += VIEWPORT_EDGE_INSET_PX;
@@ -244,9 +242,9 @@
       const availableBelow = Math.max(0, bounds.bottom - triggerBottom - MENU_GAP_PX);
       const preferredMinimum = Math.min(naturalHeight, PREFERRED_PLACEMENT_MIN_HEIGHT_PX);
       let openUp;
-      if (placementPreference === "up") {
+      if (viewportPlacement === "up") {
         openUp = availableAbove >= preferredMinimum || availableBelow <= availableAbove;
-      } else if (placementPreference === "down") {
+      } else if (viewportPlacement === "down") {
         openUp = availableBelow < preferredMinimum && availableAbove > availableBelow;
       } else {
         openUp = availableBelow < naturalHeight && availableAbove > availableBelow;
@@ -261,7 +259,7 @@
       picker.classList.toggle("open-up", openUp);
       picker.classList.toggle("menu-scrollable", maxHeight < naturalHeight);
       menu.style.maxHeight = maxHeight + "px";
-      if (positionStrategy === "viewport-fixed") {
+      if (usesViewportPlacement) {
         const renderedHeight = Math.min(naturalHeight, maxHeight);
         const maxWidth = bounds.right == null ? null : Math.max(0, bounds.right - bounds.left);
         const renderedWidth = triggerWidth == null
@@ -287,7 +285,7 @@
 
     function resetFixedMenuGeometry() {
       menu.style.maxHeight = "";
-      if (positionStrategy !== "viewport-fixed") return;
+      if (!usesViewportPlacement) return;
       menu.style.top = "";
       menu.style.right = "";
       menu.style.bottom = "";
@@ -321,7 +319,7 @@
     }
 
     function attachScrollBoundary() {
-      if (positionStrategy !== "viewport-fixed") return;
+      if (!usesViewportPlacement) return;
       const nextBoundary = findPlacementBoundary();
       if (nextBoundary === scrollBoundary) return;
       detachScrollBoundary();
@@ -428,7 +426,7 @@
 
     function reflow() {
       if (disposed) return;
-      if (positionStrategy !== "viewport-fixed") ensureVisible();
+      if (!usesViewportPlacement) ensureVisible();
       if (isOpen) positionMenu();
     }
 

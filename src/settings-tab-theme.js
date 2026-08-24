@@ -19,30 +19,13 @@
     return document.getElementById("content");
   }
 
-  function focusSettingsKey(focusKey) {
-    const content = getContentElement();
-    if (!content || !focusKey) return;
-    const queue = Array.from(content.children || []);
-    while (queue.length > 0) {
-      const element = queue.shift();
-      if (element && typeof element.getAttribute === "function"
-          && element.getAttribute("data-settings-focus-key") === focusKey) {
-        if (element.disabled !== true && typeof element.focus === "function") {
-          try { element.focus({ preventScroll: true }); } catch (_) { element.focus(); }
-        }
-        return;
-      }
-      if (element && element.children) queue.push(...Array.from(element.children));
-    }
-  }
-
   function stabilizeCustomizationView({ themeId = null, scrollTop, focusKey }) {
     const apply = () => {
       if (state.activeTab !== "theme") return;
       if (themeId ? customizingThemeId !== themeId : customizingThemeId !== null) return;
       const content = getContentElement();
       if (content) content.scrollTop = scrollTop;
-      focusSettingsKey(focusKey);
+      ops.focusSettingsTarget(content, focusKey);
     };
     apply();
     if (root && typeof root.requestAnimationFrame === "function") root.requestAnimationFrame(apply);
@@ -464,8 +447,7 @@
       options: pickerOptions,
       ariaLabel: t("rowPetColor"),
       className: "pet-tint-select",
-      positionStrategy: "viewport-fixed",
-      placementPreference: "down",
+      viewportPlacement: "down",
       disabled: options.length === 0,
       onChange(next) {
         const committed = getThemeTintId(theme.id, options);
@@ -534,8 +516,7 @@
       options: pickerOptions,
       ariaLabel: t("rowPetAccessory"),
       className: "pet-accessory-select",
-      positionStrategy: "viewport-fixed",
-      placementPreference: "up",
+      viewportPlacement: "up",
       disabled: options.length === 0,
       onChange(next) {
         const committed = getThemeAccessoryId(theme.id, options);
