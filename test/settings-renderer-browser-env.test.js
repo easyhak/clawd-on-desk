@@ -9870,7 +9870,7 @@ describe("settings renderer browser environment", () => {
     assert.ok(generalSource.includes('input.value.replace(/\\D+/g, "").slice(0, 4)'));
     assert.ok(generalSource.includes("showSettingsConfirmModal"));
     assert.ok(generalSource.includes("updateBubbleDisableConfirmTitle"));
-    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*42px;/.test(css));
+    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*58px;/.test(css));
     assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*text-align:\s*center;/.test(css));
     assert.ok(i18nSource.includes("rowHideBubbles"));
     assert.ok(i18nSource.includes("rowBubblePolicy"));
