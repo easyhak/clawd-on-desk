@@ -322,7 +322,7 @@
       if (Number.isFinite(value)) control.setValue(value);
       const blocked = isTimingControlBlocked(control.cardId);
       if (control.range) control.range.disabled = blocked;
-      if (control.number) control.number.disabled = blocked;
+      if (control.number) helpers.setTextInputState(control.number, { disabled: blocked });
     }
   }
 
@@ -1972,12 +1972,20 @@
     range.value = String(clampNumber(value, min, max));
     row.appendChild(range);
 
-    const number = document.createElement("input");
-    number.type = "number";
+    const number = helpers.buildTextInput({
+      type: "number",
+      size: "compact",
+      className: "anim-override-number-input",
+      value: String(value),
+      ariaLabel: label,
+      onEnter: () => {
+        commitFromNumber();
+        number.blur();
+      },
+    });
     number.min = String(Number.isFinite(numberMin) ? numberMin : min);
     number.max = String(Number.isFinite(numberMax) ? numberMax : max);
     number.step = String(step);
-    number.value = String(value);
 
     const numberField = document.createElement("span");
     numberField.className = "anim-override-number-field";
@@ -2039,7 +2047,7 @@
     });
     const initialBlocked = isTimingControlBlocked(cardId);
     range.disabled = initialBlocked;
-    number.disabled = initialBlocked;
+    helpers.setTextInputState(number, { disabled: initialBlocked });
 
     range.addEventListener("change", () => {
       const v = Number(range.value);

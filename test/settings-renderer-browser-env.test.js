@@ -738,6 +738,58 @@ function sampleRecapView() {
   };
 }
 
+function setFakeTextInputState(input, nextState = {}) {
+  const state = { disabled: false, pending: false, invalid: false, lockWhilePending: true,
+    ...(input._settingsTextInputState || {}) };
+  for (const key of ["disabled", "pending", "invalid"]) {
+    if (Object.prototype.hasOwnProperty.call(nextState, key)) state[key] = nextState[key] === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(nextState, "lockWhilePending")) {
+    state.lockWhilePending = nextState.lockWhilePending !== false;
+  }
+  input._settingsTextInputState = state;
+  input.disabled = state.disabled || (state.pending && state.lockWhilePending);
+  input.classList.toggle("pending", state.pending);
+  input.classList.toggle("invalid", state.invalid);
+  input.setAttribute("aria-busy", state.pending ? "true" : "false");
+  input.setAttribute("aria-invalid", state.invalid ? "true" : "false");
+  if (Object.prototype.hasOwnProperty.call(nextState, "describedBy")) {
+    if (nextState.describedBy) input.setAttribute("aria-describedby", nextState.describedBy);
+    else input.removeAttribute("aria-describedby");
+  }
+  return input;
+}
+
+function buildFakeTextInput(document, config = {}) {
+  const input = document.createElement("input");
+  const size = config.size === "compact" ? "compact" : "regular";
+  input.type = config.type || "text";
+  input.className = [
+    "settings-text-input",
+    `settings-text-input-${size}`,
+    config.className || "",
+  ].filter(Boolean).join(" ");
+  if (config.value != null) input.value = String(config.value);
+  if (config.placeholder != null) input.placeholder = String(config.placeholder);
+  if (config.autocomplete != null) input.autocomplete = String(config.autocomplete);
+  if (config.spellcheck != null) input.spellcheck = config.spellcheck === true;
+  if (config.inputMode != null) input.inputMode = String(config.inputMode);
+  if (config.maxLength != null) input.maxLength = Number(config.maxLength);
+  if (config.pattern != null) input.pattern = String(config.pattern);
+  if (config.ariaLabel) input.setAttribute("aria-label", config.ariaLabel);
+  if (config.describedBy) input.setAttribute("aria-describedby", config.describedBy);
+  if (typeof config.onInput === "function") input.addEventListener("input", config.onInput);
+  if (config.stopPropagation === true) input.addEventListener("click", (event) => event.stopPropagation());
+  input.addEventListener("keydown", (event) => {
+    if (config.stopPropagation === true) event.stopPropagation();
+    if (event.key !== "Enter" || typeof config.onEnter !== "function"
+      || event.isComposing === true || event.keyCode === 229) return;
+    event.preventDefault();
+    config.onEnter(event, input);
+  });
+  return setFakeTextInputState(input, config);
+}
+
 function loadSharedLanguagePickerForTest({
   value = "en",
   options = ["en", "zh", "ja"],
@@ -1833,6 +1885,8 @@ function loadTelegramApprovalTabForTest({
     runtime: {},
     helpers: {
       t: (key) => key,
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       showSettingsConfirmModal: showConfirmModal,
       buildSection: (_title, rows) => {
         const section = document.createElement("section");
@@ -2141,6 +2195,8 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
     },
     helpers: {
       t: (key) => key,
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       buildSection: (_title, rows) => {
         const section = document.createElement("section");
         for (const row of rows) section.appendChild(row);
@@ -2427,6 +2483,8 @@ function loadAnimOverridesTabForTest({
     runtime,
     helpers: {
       t: (key) => key,
+      buildTextInput: (config) => buildFakeTextInput(document, config),
+      setTextInputState: setFakeTextInputState,
       createDisclosureChevron: (className) => {
         const chevron = document.createElement("span");
         chevron.className = className;
@@ -9131,6 +9189,90 @@ describe("settings renderer browser environment", () => {
     assert.equal(button.getAttribute("aria-label"), "Delete profile");
   });
 
+  it("builds Settings text inputs from one size, accessibility, state, and IME-safe Enter contract", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const submitted = [];
+    const input = core.helpers.buildTextInput({
+      type: "password",
+      size: "compact",
+      value: "secret",
+      placeholder: "API key",
+      autocomplete: "new-password",
+      spellcheck: false,
+      inputMode: "text",
+      ariaLabel: "Dedicated API key",
+      describedBy: "key-help",
+      pending: true,
+      lockWhilePending: false,
+      onEnter: (_event, element) => submitted.push(element.value),
+    });
+
+    assert.equal(input.classList.contains("settings-text-input"), true);
+    assert.equal(input.classList.contains("settings-text-input-compact"), true);
+    assert.equal(input.classList.contains("pending"), true);
+    assert.equal(input.type, "password");
+    assert.equal(input.value, "secret");
+    assert.equal(input.autocomplete, "new-password");
+    assert.equal(input.spellcheck, false);
+    assert.equal(input.disabled, false, "editable-pending fields stay editable");
+    assert.equal(input.getAttribute("aria-busy"), "true");
+    assert.equal(input.getAttribute("aria-invalid"), "false");
+    assert.equal(input.getAttribute("aria-label"), "Dedicated API key");
+    assert.equal(input.getAttribute("aria-describedby"), "key-help");
+
+    input.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true });
+    input.dispatchEvent({ type: "keydown", key: "Enter", keyCode: 229 });
+    assert.deepStrictEqual(submitted, [], "IME composition must not submit");
+    const enter = { type: "keydown", key: "Enter" };
+    input.dispatchEvent(enter);
+    assert.deepStrictEqual(submitted, ["secret"]);
+    assert.equal(enter.defaultPrevented, true);
+
+    core.helpers.setTextInputState(input, {
+      invalid: true,
+      describedBy: "key-error",
+    });
+    assert.equal(input.disabled, false, "partial state updates preserve editable-pending mode");
+    assert.equal(input.getAttribute("aria-busy"), "true", "partial updates preserve pending state");
+    assert.equal(input.classList.contains("invalid"), true);
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(input.getAttribute("aria-describedby"), "key-error");
+
+    core.helpers.setTextInputState(input, { lockWhilePending: true });
+    assert.equal(input.disabled, true, "pending fields lock when requested");
+    const passive = core.helpers.buildTextInput({ ariaLabel: "Passive field" });
+    const passiveEnter = { type: "keydown", key: "Enter" };
+    passive.dispatchEvent(passiveEnter);
+    assert.notEqual(passiveEnter.defaultPrevented, true, "Enter remains untouched without an onEnter callback");
+  });
+
+  it("routes every Settings single-line text surface through the shared primitive", () => {
+    const files = [
+      "settings-tab-agents.js",
+      "settings-tab-discord-presence.js",
+      "settings-tab-general.js",
+      "settings-tab-remote-ssh.js",
+      "settings-tab-telegram-approval.js",
+    ];
+    for (const file of files) {
+      const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
+      assert.ok(source.includes("buildTextInput({"), `${file} should use buildTextInput`);
+      assert.doesNotMatch(source, /document\.createElement\("input"\)/, `${file} should not create raw inputs`);
+    }
+    const animSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-anim-overrides.js"), "utf8");
+    assert.ok(animSource.includes('type: "number"'));
+    assert.ok(animSource.includes('className: "anim-override-number-input"'));
+    const css = fs.readFileSync(SETTINGS_CSS, "utf8");
+    assert.match(css, /\.settings-text-input\s*\{[\s\S]*border-radius:\s*8px;[\s\S]*background:\s*var\(--panel-bg\);/);
+    assert.match(css, /\.settings-text-input:focus\s*\{[\s\S]*var\(--accent\)/);
+    assert.match(css, /\.settings-text-input\.invalid/);
+  });
+
   it("uses the shared Settings dialog shell with ARIA links and focus restoration", async () => {
     const body = new FakeElement("body");
     const modalRoot = new FakeElement("div");
@@ -9722,14 +9864,14 @@ describe("settings renderer browser environment", () => {
     assert.ok(generalSource.includes("notificationBubbleAutoCloseSeconds"));
     assert.ok(generalSource.includes("updateBubbleAutoCloseSeconds"));
     assert.ok(generalSource.includes("bubble-policy-prefix"));
-    assert.ok(generalSource.includes('input.type = "text"'));
-    assert.ok(generalSource.includes("input.maxLength = 4"));
-    assert.ok(generalSource.includes('input.pattern = "[0-9]*"'));
+    assert.ok(generalSource.includes("helpers.buildTextInput({"));
+    assert.ok(generalSource.includes("maxLength: 4"));
+    assert.ok(generalSource.includes('pattern: "[0-9]*"'));
     assert.ok(generalSource.includes('input.value.replace(/\\D+/g, "").slice(0, 4)'));
     assert.ok(generalSource.includes("showSettingsConfirmModal"));
     assert.ok(generalSource.includes("updateBubbleDisableConfirmTitle"));
     assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*width:\s*42px;/.test(css));
-    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*box-sizing:\s*border-box;[\s\S]*text-align:\s*center;[\s\S]*padding:\s*0 3px;/.test(css));
+    assert.ok(/\.bubble-policy-seconds\s*\{[\s\S]*text-align:\s*center;/.test(css));
     assert.ok(i18nSource.includes("rowHideBubbles"));
     assert.ok(i18nSource.includes("rowBubblePolicy"));
     assert.ok(i18nSource.includes("bubbleUpdateWarning"));
@@ -12730,12 +12872,19 @@ describe("settings renderer browser environment", () => {
     const input = connectSection.querySelector(".kimi-quota-key-input");
     assert.strictEqual(input.type, "password");
     assert.strictEqual(input.autocomplete, "new-password");
+    assert.ok(input.classList.contains("settings-text-input"));
     const connectPrimary = connectSection.querySelectorAll(".kimi-quota-primary");
     assert.strictEqual(connectPrimary.length, 1, "the connect card has exactly one primary action");
     assert.ok(connectPrimary[0].classList.contains("accent"));
     // The Console link is present but quiet — it never competes with Connect.
     assert.ok(connectSection.querySelector(".kimi-quota-console-link").classList.contains("quiet"));
 
+    input.dispatchEvent({ type: "keydown", key: "Enter" });
+    assert.strictEqual(input.getAttribute("aria-invalid"), "true", "empty Enter marks the key invalid");
+    input.value = "ime-draft";
+    input.dispatchEvent({ type: "keydown", key: "Enter", isComposing: true });
+    assert.strictEqual(connectedKey, null, "IME composition must not submit a key");
+    assert.strictEqual(input.value, "ime-draft");
     input.value = "sk-renderer-secret";
     connectPrimary[0].dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(input.value, "", "the DOM must drop the key immediately after submission");
@@ -12761,7 +12910,13 @@ describe("settings renderer browser environment", () => {
       .find((button) => button.classList.contains("quiet"));
     replaceToggle.dispatchEvent({ type: "click", stopPropagation() {} });
     assert.strictEqual(replacePanel.hidden, false);
-    assert.ok(replacePanel.querySelector(".kimi-quota-key-input"));
+    const replaceInput = replacePanel.querySelector(".kimi-quota-key-input");
+    assert.ok(replaceInput);
+    replaceInput.value = "sk-replacement-secret";
+    replaceInput.dispatchEvent({ type: "keydown", key: "Enter" });
+    assert.strictEqual(replaceInput.value, "", "Enter clears replacement credentials immediately");
+    await flush();
+    assert.strictEqual(connectedKey, "sk-replacement-secret", "Enter uses the dedicated key IPC");
 
     // Destructive / low-frequency actions live in the separated danger zone,
     // each with its own consequence note — never beside Refresh.
@@ -12970,6 +13125,8 @@ describe("settings renderer browser environment", () => {
     assert.ok(group.classList.contains("collapsed"), "catalog starts collapsed");
     const search = group.querySelector(".agent-section-search");
     assert.ok(search, "the catalog header carries a search box");
+    assert.ok(search.classList.contains("settings-text-input"));
+    assert.ok(search.classList.contains("settings-text-input-compact"));
     assert.strictEqual(search.placeholder, "Search");
     assert.strictEqual(group.querySelector(".agent-section-count").textContent, "3");
 

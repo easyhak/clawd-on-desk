@@ -117,14 +117,30 @@
 
     const ctrl = document.createElement("div");
     ctrl.className = "row-control tg-approval-input-row";
-    const input = document.createElement("input");
-    input.type = "text";
-    input.inputMode = "numeric";
-    input.spellcheck = false;
-    input.placeholder = t("discordPresenceAppIdPlaceholder");
-    input.className = "tg-approval-input";
-    input.value = draft || "";
+    function submitAppId() {
+      const raw = String(view.appIdDraft == null ? draft : view.appIdDraft).trim();
+      if (raw && !APP_ID_RE.test(raw)) {
+        helpers.setTextInputState(input, { invalid: true });
+        input.focus();
+        ops.showToast(t("discordPresenceInvalidAppId"), { error: true });
+        return;
+      }
+      const cfg = currentConfig();
+      saveConfig({ ...cfg, applicationId: raw });
+    }
+    const input = helpers.buildTextInput({
+      type: "text",
+      inputMode: "numeric",
+      spellcheck: false,
+      placeholder: t("discordPresenceAppIdPlaceholder"),
+      className: "tg-approval-input",
+      value: draft || "",
+      ariaLabel: t("discordPresenceAppIdLabel"),
+      pending: view.configPending,
+      onEnter: submitAppId,
+    });
     input.addEventListener("input", () => {
+      helpers.setTextInputState(input, { pending: view.configPending, invalid: false });
       view.appIdDraft = input.value;
       view.appIdDirty = true;
     });
@@ -134,15 +150,7 @@
     saveBtn.className = "soft-btn accent";
     saveBtn.textContent = view.configPending ? t("discordPresenceSaving") : t("discordPresenceSaveAppId");
     saveBtn.disabled = view.configPending;
-    saveBtn.addEventListener("click", () => {
-      const raw = String(view.appIdDraft == null ? draft : view.appIdDraft).trim();
-      if (raw && !APP_ID_RE.test(raw)) {
-        ops.showToast(t("discordPresenceInvalidAppId"), { error: true });
-        return;
-      }
-      const cfg = currentConfig();
-      saveConfig({ ...cfg, applicationId: raw });
-    });
+    saveBtn.addEventListener("click", submitAppId);
 
     ctrl.appendChild(input);
     ctrl.appendChild(saveBtn);

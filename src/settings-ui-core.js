@@ -402,6 +402,81 @@
     return button;
   }
 
+  function setTextInputState(input, nextState = {}) {
+    if (!input) return input;
+    const previous = input._settingsTextInputState || {
+      disabled: false,
+      pending: false,
+      invalid: false,
+      lockWhilePending: true,
+    };
+    const state = { ...previous };
+    for (const key of ["disabled", "pending", "invalid"]) {
+      if (Object.prototype.hasOwnProperty.call(nextState, key)) state[key] = nextState[key] === true;
+    }
+    if (Object.prototype.hasOwnProperty.call(nextState, "lockWhilePending")) {
+      state.lockWhilePending = nextState.lockWhilePending !== false;
+    }
+    input._settingsTextInputState = state;
+    input.disabled = state.disabled || (state.pending && state.lockWhilePending);
+    input.classList.toggle("pending", state.pending);
+    input.classList.toggle("invalid", state.invalid);
+    input.setAttribute("aria-busy", state.pending ? "true" : "false");
+    input.setAttribute("aria-invalid", state.invalid ? "true" : "false");
+    if (Object.prototype.hasOwnProperty.call(nextState, "describedBy")) {
+      if (nextState.describedBy) input.setAttribute("aria-describedby", String(nextState.describedBy));
+      else input.removeAttribute("aria-describedby");
+    }
+    return input;
+  }
+
+  function buildTextInput(config = {}) {
+    const input = document.createElement("input");
+    const size = config.size === "compact" ? "compact" : "regular";
+    input.type = config.type || "text";
+    input.className = [
+      "settings-text-input",
+      `settings-text-input-${size}`,
+      config.className || "",
+    ].filter(Boolean).join(" ");
+    if (config.value != null) input.value = String(config.value);
+    if (config.placeholder != null) input.placeholder = String(config.placeholder);
+    if (config.autocomplete != null) input.autocomplete = String(config.autocomplete);
+    if (config.spellcheck != null) input.spellcheck = config.spellcheck === true;
+    if (config.inputMode != null) input.inputMode = String(config.inputMode);
+    if (config.maxLength != null) input.maxLength = Number(config.maxLength);
+    if (config.pattern != null) input.pattern = String(config.pattern);
+    if (config.ariaLabel) input.setAttribute("aria-label", String(config.ariaLabel));
+    if (config.labelledBy) input.setAttribute("aria-labelledby", String(config.labelledBy));
+    if (config.describedBy) input.setAttribute("aria-describedby", String(config.describedBy));
+
+    if (typeof config.onInput === "function") input.addEventListener("input", config.onInput);
+    if (typeof config.onChange === "function") input.addEventListener("change", config.onChange);
+    if (typeof config.onBlur === "function") input.addEventListener("blur", config.onBlur);
+    if (config.stopPropagation === true) {
+      input.addEventListener("click", (event) => event.stopPropagation());
+    }
+    input.addEventListener("keydown", (event) => {
+      if (config.stopPropagation === true) event.stopPropagation();
+      if (
+        event.key !== "Enter"
+        || typeof config.onEnter !== "function"
+        || event.isComposing === true
+        || event.keyCode === 229
+      ) return;
+      event.preventDefault();
+      config.onEnter(event, input);
+    });
+    setTextInputState(input, {
+      disabled: config.disabled,
+      pending: config.pending,
+      invalid: config.invalid,
+      lockWhilePending: config.lockWhilePending,
+      describedBy: config.describedBy,
+    });
+    return input;
+  }
+
   function buildSettingsSelect(config = {}) {
     const factory = selectPickerApi.createSettingsSelect || selectPickerApi.createLanguagePicker;
     if (typeof factory !== "function") {
@@ -1106,19 +1181,32 @@
         `<span class="row-label"></span>` +
         `<span class="row-desc"></span>` +
       `</div>` +
-      `<div class="row-control session-cleanup-control">` +
-        `<input type="text" class="bubble-policy-seconds session-cleanup-input" inputmode="numeric" />` +
-        `<span class="bubble-policy-unit session-cleanup-unit"></span>` +
-      `</div>`;
+      `<div class="row-control session-cleanup-control"></div>`;
     row.querySelector(".row-label").textContent = t(labelKey);
     const descNode = row.querySelector(".row-desc");
     if (descKey) descNode.textContent = t(descKey);
     else descNode.remove();
-    const input = row.querySelector(".session-cleanup-input");
-    const unit = row.querySelector(".session-cleanup-unit");
-    if (unitKey) unit.textContent = t(unitKey);
-    else unit.remove();
-    input.maxLength = String(max).length + 1;
+    const control = row.querySelector(".session-cleanup-control");
+    const input = buildTextInput({
+      type: "text",
+      size: "compact",
+      className: "bubble-policy-seconds session-cleanup-input",
+      inputMode: "numeric",
+      maxLength: String(max).length + 1,
+      ariaLabel: t(labelKey),
+      onEnter: () => {
+        clearCommitTimer();
+        commitFromInput();
+        input.blur();
+      },
+    });
+    control.appendChild(input);
+    const unit = document.createElement("span");
+    unit.className = "bubble-policy-unit session-cleanup-unit";
+    if (unitKey) {
+      unit.textContent = t(unitKey);
+      control.appendChild(unit);
+    }
 
     function currentStored() {
       const stored = state.snapshot && state.snapshot[key];
@@ -1219,12 +1307,7 @@
       commitFromInput();
     });
     input.addEventListener("keydown", (ev) => {
-      if (ev.key === "Enter") {
-        ev.preventDefault();
-        clearCommitTimer();
-        commitFromInput();
-        input.blur();
-      } else if (ev.key === "Escape") {
+      if (ev.key === "Escape") {
         ev.preventDefault();
         clearCommitTimer();
         revert();
@@ -2128,6 +2211,8 @@
   core.helpers = {
     t,
     buildButton,
+    buildTextInput,
+    setTextInputState,
     showSettingsDialog,
     showSettingsConfirmModal,
     escapeHtml,
