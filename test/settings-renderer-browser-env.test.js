@@ -678,12 +678,13 @@ function loadRecapTabForTest({ data, agentMetadata = [], queryRecap } = {}) {
   context.globalThis = context;
   vm.createContext(context);
   vm.runInContext(fs.readFileSync(path.join(SRC_DIR, "settings-tab-recap.js"), "utf8"), context);
+  const sharedControls = loadSharedButtonHelpersForTest(document, context.settingsAPI);
   const core = {
     state: { activeTab: "recap", snapshot: { lang: "en", recapEnabled: true } },
     runtime: { agentMetadata },
     helpers: {
       t: (key) => strings[key] || key,
-      setSwitchVisual: (element, enabled) => element.setAttribute("aria-checked", String(enabled)),
+      buildSwitch: sharedControls.buildSwitch,
       buildSection: (title, rows) => {
         const section = document.createElement("section");
         section.setAttribute("aria-label", title);
