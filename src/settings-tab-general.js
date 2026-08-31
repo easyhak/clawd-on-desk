@@ -99,7 +99,6 @@
   let helpers = null;
   let ops = null;
   let i18n = null;
-  const languagePickerApi = root.ClawdLanguagePicker || {};
 
   const LANGUAGE_OPTIONS = ["en", "zh", "zh-TW", "ko", "ja", "pt-BR", "es"];
   const ROAM_MOVEMENT_NATURAL = "natural";
@@ -781,13 +780,11 @@
     row.querySelector(".row-desc").textContent = t("rowLanguageDesc");
     const currentLang = readers.getLang();
     const getLabel = (lang) => t(LANGUAGE_LABEL_KEYS[lang] || "langEnglish");
-    if (typeof languagePickerApi.createLanguagePicker !== "function") {
-      throw new Error("language-picker.js failed to load before settings-tab-general.js");
-    }
-    const pickerControl = languagePickerApi.createLanguagePicker({
+    const pickerControl = helpers.buildSettingsSelect({
       value: currentLang,
       options: LANGUAGE_OPTIONS.map((lang) => ({ value: lang, label: getLabel(lang) })),
       ariaLabel: t("rowLanguage"),
+      className: "settings-language-select",
       onChange: (next) => {
         // Selecting the already committed language only closes the menu. This
         // also avoids sending a duplicate update while an earlier save settles.
@@ -813,7 +810,6 @@
       },
     });
     row.querySelector(".row-control").appendChild(pickerControl.element);
-    state.mountedControls.languagePicker = pickerControl;
     return row;
   }
 
@@ -882,6 +878,7 @@
           if (Number(count) <= 1) return;
           const revealMergeRow = () => {
             mergeRow.style.display = "";
+            return mergeRow;
           };
           if (typeof group.mutateCollapsibleBody === "function") {
             group.mutateCollapsibleBody(revealMergeRow);
@@ -984,6 +981,7 @@
               element.appendChild(buildProviderRow(provider));
             }
             element.style.display = "";
+            return element;
           };
           if (group && typeof group.mutateCollapsibleBody === "function") {
             group.mutateCollapsibleBody(reveal);

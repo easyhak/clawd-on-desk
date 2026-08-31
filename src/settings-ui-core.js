@@ -79,7 +79,6 @@
       idleVisualPicker: null,
       bubblePolicySummary: null,
       sessionHudSummary: null,
-      languagePicker: null,
       size: null,
       soundSummary: null,
       soundVolume: null,
@@ -130,6 +129,7 @@
     nextAnimationOverrideEditSeq: 1,
     animOverridesSubtab: "map",
     settingsTabScrollPositions: new Map(),
+    persistedSettingsTab: "general",
     // null = not chosen yet; the Agents tab resolves it from what is connected.
     agentsSubtab: null,
     agentsUnavailableQuery: "",
@@ -858,24 +858,26 @@
       transitionTimer = null;
       transitionState = null;
       disclosureRoot.classList.remove("expanding", "collapsing");
+      setBodyInteractivity(isExpanded);
     }
 
-    function setBodyInteractivity(nextExpanded) {
+    function setBodyInteractivity(nextExpanded, isTransitioning = false) {
       body.setAttribute("aria-hidden", nextExpanded ? "false" : "true");
+      const bodyInert = !nextExpanded || isTransitioning;
       if ("inert" in body) {
-        body.inert = !nextExpanded;
-      } else if (nextExpanded) {
-        body.removeAttribute("inert");
-      } else {
+        body.inert = bodyInert;
+      } else if (bodyInert) {
         body.setAttribute("inert", "");
+      } else {
+        body.removeAttribute("inert");
       }
     }
 
-    function syncState() {
+    function syncState({ isTransitioning = false } = {}) {
       trigger.setAttribute("aria-expanded", isExpanded ? "true" : "false");
       disclosureRoot.classList.toggle("expanded", isExpanded);
       disclosureRoot.classList.toggle("collapsed", !isExpanded);
-      setBodyInteractivity(isExpanded);
+      setBodyInteractivity(isExpanded, isTransitioning);
       if (typeof syncTrigger === "function") syncTrigger(isExpanded);
     }
 
@@ -890,13 +892,15 @@
       if (disposed) return false;
       const normalized = !!nextExpanded;
       if (normalized === isExpanded) return false;
-      const shouldAnimate = options.animate === undefined ? animate : options.animate !== false;
+      const animateRequested = options.animate === undefined ? animate : options.animate !== false;
       const apply = () => {
         finishTransition();
         isExpanded = normalized;
-        syncState();
-        if (!shouldAnimate || prefersReducedMotion()) {
-          if (!prefersReducedMotion()) suppressTransitionOnce();
+        const reducedMotion = prefersReducedMotion();
+        const shouldAnimate = animateRequested && !reducedMotion;
+        syncState({ isTransitioning: shouldAnimate });
+        if (!shouldAnimate) {
+          if (!reducedMotion) suppressTransitionOnce();
           return;
         }
         transitionState = isExpanded ? "expanding" : "collapsing";
@@ -932,8 +936,9 @@
 
     trigger.addEventListener("click", onClick);
     if (triggerTag !== "BUTTON") trigger.addEventListener("keydown", onKeyDown);
+    // A reversed transition emits a stale transitioncancel after the new
+    // generation starts. Only its transitionend or watchdog may release inert.
     body.addEventListener("transitionend", onBodyTransitionFinished);
-    body.addEventListener("transitioncancel", onBodyTransitionFinished);
     syncState();
 
     return {
@@ -951,7 +956,6 @@
         trigger.removeEventListener("click", onClick);
         if (triggerTag !== "BUTTON") trigger.removeEventListener("keydown", onKeyDown);
         body.removeEventListener("transitionend", onBodyTransitionFinished);
-        body.removeEventListener("transitioncancel", onBodyTransitionFinished);
       },
     };
   }
@@ -1035,26 +1039,34 @@
     for (const child of children) bodyInner.appendChild(child);
     body.appendChild(bodyInner);
 
-    let contentAnimationTimer = null;
-
+    const contentAnimationTimers = new Map();
     function refreshCollapsibleHeight() {
       // Compatibility shim: the grid-based body follows its natural height.
     }
 
     function mutateCollapsibleBody(mutate) {
       if (typeof mutate !== "function") return;
-      mutate();
+      // Callers return the newly inserted or revealed elements so existing
+      // controls do not replay their entrance animation on every async update.
+      const result = mutate();
       if (!controller.expanded || controller.transitioning === "collapsing" || prefersReducedMotion()) return;
-      cancelSettingsTimeout(contentAnimationTimer);
-      group.classList.remove("collapsible-content-entering");
-      void bodyInner.offsetWidth;
-      group.classList.add("collapsible-content-entering");
-      contentAnimationTimer = scheduleSettingsTimeout(() => {
-        contentAnimationTimer = null;
-        group.classList.remove("collapsible-content-entering");
-      }, 240);
+      const targets = Array.isArray(result) ? result : [result];
+      for (const target of targets) {
+        if (!target || !target.classList) continue;
+        if (contentAnimationTimers.has(target)) {
+          cancelSettingsTimeout(contentAnimationTimers.get(target));
+          contentAnimationTimers.delete(target);
+        }
+        target.classList.remove("collapsible-content-entering");
+        void target.offsetWidth;
+        target.classList.add("collapsible-content-entering");
+        const timer = scheduleSettingsTimeout(() => {
+          contentAnimationTimers.delete(target);
+          target.classList.remove("collapsible-content-entering");
+        }, 240);
+        if (timer !== null) contentAnimationTimers.set(target, timer);
+      }
     }
-
     function preserveScrollAnchor(invoke) {
       const scroller = document.getElementById("content");
       if (!scroller || !document.body.contains(header)) {
@@ -1098,9 +1110,11 @@
     const trackedDisclosure = {
       dispose() {
         controller.dispose();
-        cancelSettingsTimeout(contentAnimationTimer);
-        contentAnimationTimer = null;
-        group.classList.remove("collapsible-content-entering");
+        for (const [target, timer] of contentAnimationTimers) {
+          cancelSettingsTimeout(timer);
+          target.classList.remove("collapsible-content-entering");
+        }
+        contentAnimationTimers.clear();
       },
     };
     registerMountedDisposable(trackedDisclosure);
@@ -1413,9 +1427,6 @@
   }
 
   function clearMountedControls() {
-    if (state.mountedControls.languagePicker && typeof state.mountedControls.languagePicker.dispose === "function") {
-      state.mountedControls.languagePicker.dispose();
-    }
     if (state.mountedControls.idleVisualPicker && typeof state.mountedControls.idleVisualPicker.dispose === "function") {
       state.mountedControls.idleVisualPicker.dispose();
     }
@@ -1451,7 +1462,6 @@
     state.mountedControls.animOverrideTimingSliders.clear();
     state.mountedControls.bubblePolicySummary = null;
     state.mountedControls.sessionHudSummary = null;
-    state.mountedControls.languagePicker = null;
     state.mountedControls.idleVisualPicker = null;
     state.mountedControls.size = null;
     state.mountedControls.soundSummary = null;
@@ -1487,10 +1497,18 @@
     }
   }
 
-  function getActiveSettingsFocusKey() {
+  function getActiveSettingsFocusState() {
     const active = document.activeElement;
-    if (!active || active === document.body || typeof active.getAttribute !== "function") return "";
-    return String(active.getAttribute("data-settings-focus-key") || "").trim();
+    if (!active || active === document.body || typeof active.getAttribute !== "function") {
+      return { focusKey: "", fallbackKey: "" };
+    }
+    const focusKey = String(active.getAttribute("data-settings-focus-key") || "").trim();
+    return {
+      focusKey,
+      fallbackKey: focusKey
+        ? String(active.getAttribute("data-settings-focus-fallback-key") || "").trim()
+        : "",
+    };
   }
 
   function findSettingsFocusTarget(rootNode, focusKey) {
@@ -1513,12 +1531,41 @@
     try { target.focus({ preventScroll: true }); } catch (_) { target.focus(); }
   }
 
-  function requestRender({ sidebar = false, content = false, modal = false } = {}) {
+  function requestRender({
+    sidebar = false,
+    content = false,
+    modal = false,
+    preserveScroll = false,
+  } = {}) {
     if (sidebar && typeof renderHooks.sidebar === "function") renderHooks.sidebar();
     if (content && typeof renderHooks.content === "function") {
-      const focusKey = getActiveSettingsFocusKey();
+      const { focusKey, fallbackKey } = getActiveSettingsFocusState();
+      const contentRoot = document.getElementById("content");
+      const scrollTop = preserveScroll && contentRoot
+        ? normalizePersistedScrollTop(Number(contentRoot.scrollTop))
+        : null;
+      const scrollTabId = state.activeTab;
       renderHooks.content();
-      if (focusKey) restoreSettingsFocus(document.getElementById("content"), focusKey);
+      if (focusKey) {
+        const currentContentRoot = document.getElementById("content");
+        const exactTarget = findSettingsFocusTarget(currentContentRoot, focusKey);
+        const restoreKey = exactTarget
+          && exactTarget.disabled !== true
+          && typeof exactTarget.focus === "function"
+          ? focusKey
+          : fallbackKey;
+        if (restoreKey) restoreSettingsFocus(currentContentRoot, restoreKey);
+      }
+      if (scrollTop !== null
+        && document.getElementById("content") === contentRoot
+        && state.activeTab === scrollTabId) {
+        contentRoot.scrollTop = scrollTop;
+        requestAnimationFrame(() => {
+          if (document.getElementById("content") !== contentRoot) return;
+          if (state.activeTab !== scrollTabId) return;
+          contentRoot.scrollTop = scrollTop;
+        });
+      }
     }
     if (modal && typeof renderHooks.modal === "function") renderHooks.modal();
   }
@@ -1543,7 +1590,9 @@
     }
     try {
       localStorage.setItem(NAVIGATION_STORAGE_KEY, JSON.stringify({
-        activeTab: tabs[state.activeTab] ? state.activeTab : "general",
+        activeTab: tabs[runtime.persistedSettingsTab]
+          ? runtime.persistedSettingsTab
+          : (tabs[state.activeTab] ? state.activeTab : "general"),
         scrollPositions,
       }));
     } catch (_) {}
@@ -1560,6 +1609,7 @@
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
       if (typeof parsed.activeTab === "string" && tabs[parsed.activeTab]) {
         state.activeTab = parsed.activeTab;
+        runtime.persistedSettingsTab = parsed.activeTab;
       }
       const scrollPositions = parsed.scrollPositions;
       if (scrollPositions && typeof scrollPositions === "object" && !Array.isArray(scrollPositions)) {
@@ -1589,9 +1639,17 @@
     });
   }
 
-  function selectTab(nextTab) {
+  function selectTab(nextTab, options = {}) {
+    if (!tabs[nextTab]) return false;
     const prevTabId = state.activeTab;
-    if (prevTabId === nextTab) return;
+    const shouldPersist = options.persist !== false;
+    if (prevTabId === nextTab) {
+      if (shouldPersist) {
+        runtime.persistedSettingsTab = nextTab;
+        writeNavigationState();
+      }
+      return false;
+    }
     captureActiveTabScrollPosition();
     const content = document.getElementById("content");
     const prevTab = tabs[prevTabId];
@@ -1599,9 +1657,10 @@
       prevTab.onExit(core);
     }
     state.activeTab = nextTab;
+    if (shouldPersist) runtime.persistedSettingsTab = nextTab;
     writeNavigationState();
     requestRender({ sidebar: true, content: true, modal: true });
-    if (!content) return;
+    if (!content) return true;
 
     const targetScrollTop = runtime.settingsTabScrollPositions.get(nextTab) || 0;
     content.scrollTop = targetScrollTop;
@@ -1610,6 +1669,7 @@
       if (document.getElementById("content") !== content) return;
       content.scrollTop = targetScrollTop;
     });
+    return true;
   }
 
   function applyBootstrap(snapshotValue) {
@@ -1620,7 +1680,12 @@
 
   function applyAgentMetadata(list) {
     runtime.agentMetadata = Array.isArray(list) ? list : [];
-    if (state.activeTab === "agents") requestRender({ content: true });
+    if (state.activeTab === "agents" || state.activeTab === "recap") {
+      requestRender({
+        content: true,
+        preserveScroll: state.activeTab === "recap",
+      });
+    }
   }
 
   function normalizeAgentInstallationHints(result) {
@@ -2010,26 +2075,44 @@
     if (changes && "themeOverrides" in changes) {
       if (state.activeTab === "theme") {
         fetchThemes().then(() => {
-          requestRender({ sidebar: true, content: true });
+          requestRender({
+            sidebar: true,
+            content: true,
+            preserveScroll: state.activeTab === "recap",
+          });
         });
         return;
       }
       if (state.activeTab === "animOverrides" || runtime.assetPicker.state) {
         Promise.all([fetchAnimationOverridesData(), fetchThemes()]).then(() => {
           normalizeAssetPickerSelection();
-          requestRender({ sidebar: true, content: true, modal: true });
+          requestRender({
+            sidebar: true,
+            content: true,
+            modal: true,
+            preserveScroll: state.activeTab === "recap",
+          });
         });
         return;
       }
       // Any other tab that surfaces theme-derived content: full re-render.
-      requestRender({ sidebar: true, content: true });
+      requestRender({
+        sidebar: true,
+        content: true,
+        preserveScroll: state.activeTab === "recap",
+      });
       return;
     }
 
     if (needsAnimOverridesRefresh && (state.activeTab === "animOverrides" || runtime.assetPicker.state)) {
       fetchAnimationOverridesData().then(() => {
         normalizeAssetPickerSelection();
-        requestRender({ sidebar: true, content: true, modal: true });
+        requestRender({
+          sidebar: true,
+          content: true,
+          modal: true,
+          preserveScroll: state.activeTab === "recap",
+        });
       });
       return;
     }
@@ -2041,7 +2124,11 @@
       }));
     }
 
-    requestRender({ sidebar: true, content: true });
+    requestRender({
+      sidebar: true,
+      content: true,
+      preserveScroll: state.activeTab === "recap",
+    });
   }
 
   core.readers = {

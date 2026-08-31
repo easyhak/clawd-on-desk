@@ -90,6 +90,7 @@ const {
 } = require("./settings-size-preview-session");
 const { registerSettingsIpc } = require("./settings-ipc");
 const createSettingsEffectRouter = require("./settings-effect-router");
+const { createRecapRuntime } = require("./recap-runtime");
 const { createKimiQuotaClient } = require("./kimi-quota-client");
 const { createKimiQuotaCredentialStore } = require("./kimi-quota-credential-store");
 const { createKimiQuotaRuntime } = require("./kimi-quota-runtime");
@@ -321,6 +322,11 @@ const _initialPrefsLoad = prefsModule.load(PREFS_PATH);
 // closed until restart in either case.
 const _initialPrefsRecovered = _initialPrefsLoad.recovered === true;
 const _initialPrefsRecoveryBackupFailed = _initialPrefsLoad.recoveryBackupFailed === true;
+const _recapStartupAuthorityLost = (
+  _initialPrefsLoad.locked === true
+  || _initialPrefsRecovered
+  || _initialPrefsRecoveryBackupFailed
+);
 const _codexAutoStartAuthorityLost = (
   _initialPrefsLoad.locked === true
   || _initialPrefsRecovered
@@ -2137,12 +2143,24 @@ function deliverRendererThemeConfig() {
   return !!finalizePetAccessorySlotsDelivery(delivery, delivered);
 }
 
+const recapRuntime = createRecapRuntime({
+  // A default-filled snapshot is not user authority when prefs were unreadable,
+  // recovered, or written by a future app version. Start paused in that case;
+  // a later explicit, controller-accepted toggle may still call setEnabled().
+  getEnabled: () => !_recapStartupAuthorityLost
+    && _settingsController.get("recapEnabled") !== false,
+  powerMonitor,
+  logWarn: console.warn,
+  onRecorded: () => settingsWindowRuntime.notifyRecapChanged(),
+});
+
 const _stateCtx = {
   get theme() { return getActiveTheme(); },
   get win() { return win; },
   get hitWin() { return hitWin; },
   // Last-known account quota survives app restarts (state-account-quota.js).
   accountQuotaPersistPath: require("./state-account-quota").DEFAULT_PERSIST_PATH,
+  recapSink: recapRuntime,
   get claudeQuotaCollectionEnabled() { return claudeQuotaCollectionEnabled; },
   get kimiQuotaCollectionEnabled() { return kimiQuotaCollectionEnabled; },
   get quotaMergeSources() { return quotaMergeSources; },
@@ -2637,8 +2655,7 @@ const _tutorial = require("./tutorial")({
   uninstallAgent: (agentId) => _settingsController.applyCommand("uninstallAgentIntegration", { agentId }),
   registerShortcut: (payload) => _settingsController.applyCommand("registerShortcut", payload),
   resetShortcut: (payload) => _settingsController.applyCommand("resetShortcut", payload),
-  // v1: deep-link to a specific tab is deferred — open Settings to its default tab.
-  openSettingsTab: () => settingsWindowRuntime.open(),
+  openSettingsTab: (tab) => settingsWindowRuntime.open({ tab }),
   markTutorialSeen: () => {
     _settingsController.applyUpdate("tutorialSeen", true);
   },
@@ -4229,7 +4246,7 @@ const _menuCtx = {
   getActiveThemeId: () => themeRuntime.getActiveThemeId("clawd"),
   getActiveThemeCapabilities: () => themeRuntime.getActiveThemeCapabilities(),
   ensureUserThemesDir: () => themeLoader.ensureUserThemesDir(),
-  openSettingsWindow: () => settingsWindowRuntime.open(),
+  openSettingsWindow: (options) => settingsWindowRuntime.open(options),
   showTutorial: () => _tutorial.open(),
 };
 const _menu = require("./menu")(_menuCtx);
@@ -4294,6 +4311,7 @@ const holidayAccessoryRuntime = createHolidayAccessoryRuntime({
 
 const settingsEffectRouter = createSettingsEffectRouter({
   settingsController: _settingsController,
+  recapRuntime,
   BrowserWindow,
   updateMirrors: updateSettingsMirrors,
   createTray,
@@ -4344,6 +4362,7 @@ const settingsEffectRouter = createSettingsEffectRouter({
   refreshDisplayedVisual: refreshDisplayedVisualForLowPowerMode,
   rebuildAllMenus,
   reconcilePowerSaveBlocker,
+  setRecapEnabled: (enabled) => recapRuntime.setEnabled(enabled),
   logWarn: console.warn,
 });
 settingsEffectRouter.start();
@@ -4607,6 +4626,7 @@ const settingsIpcRuntime = registerSettingsIpc({
   fs,
   path,
   settingsController: _settingsController,
+  recapRuntime,
   getQuotaSourceCount: () => _state.getQuotaSourceCount(),
   getQuotaRingProviders: () => _ringGeom.listQuotaRingProviders(
     _state.buildSessionSnapshot(),
@@ -5418,6 +5438,8 @@ if (!gotTheLock) {
     catch (err) { console.warn("Clawd: discord presence startup failed:", err && err.message); }
     queueFeishuApprovalSync("startup");
     createWindow();
+    try { recapRuntime.start(); }
+    catch (err) { console.warn("Clawd: local recap startup failed:", err && err.code ? err.code : "storage-error"); }
     // Reconcile the local quota binding only after the app has visible UI.
     // initialize() reads opaque credential metadata but never decrypts the key
     // or performs a network request, so ordinary startup cannot be held behind
@@ -5568,6 +5590,7 @@ if (!gotTheLock) {
     if (_lanWss) _lanWss.cleanup();
     _updateBubble.cleanup();
     if (displayedVisualProjection) displayedVisualProjection.dispose();
+    try { recapRuntime.dispose(); } catch {}
     _state.cleanup();
     _tick.cleanup();
     _mini.cleanup();

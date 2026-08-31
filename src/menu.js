@@ -495,6 +495,10 @@ module.exports = function initMenu(ctx) {
         },
       },
       {
+        label: t("openRecap"),
+        click: () => ctx.openSettingsWindow({ tab: "recap" }),
+      },
+      {
         label: t("newSession"),
         submenu: [
           {
