@@ -71,6 +71,8 @@ function sameBounds(a, b) {
 
 module.exports = function initDashboard(ctx) {
   let dashboardWindow = null;
+  let dashboardRendererReady = false;
+  let pendingQuickSelect = false;
   let saveBoundsTimer = null;
   let lastSavedBounds = null;
   let programmaticEventBounds = null;
@@ -405,6 +407,31 @@ module.exports = function initDashboard(ctx) {
     dashboardWindow.webContents.send("dashboard:lang-change", ctx.getI18n());
   }
 
+  function sendQuickSelectEvent(channel) {
+    if (!dashboardWindow || dashboardWindow.isDestroyed()) return;
+    if (!dashboardWindow.webContents || dashboardWindow.webContents.isDestroyed()) return;
+    dashboardWindow.webContents.send(channel);
+  }
+
+  function updateQuickSelectIntent(options = {}) {
+    const shouldEnter = options.source === "shortcut" && options.quickSelect === true;
+    pendingQuickSelect = shouldEnter;
+    if (!dashboardRendererReady) return;
+    sendQuickSelectEvent(
+      shouldEnter ? "dashboard:quick-select-intent" : "dashboard:quick-select-exit"
+    );
+  }
+
+  // The wake event is intentionally only a hint. This consumable owner-side
+  // intent survives a renderer reload or an event sent before preload has
+  // attached its listener, while still making each shortcut press one-shot.
+  function consumeQuickSelectIntent() {
+    dashboardRendererReady = true;
+    const enterQuickSelect = pendingQuickSelect;
+    pendingQuickSelect = false;
+    return { status: "ok", enterQuickSelect };
+  }
+
   function createDashboardWindow(options = {}) {
     const placement = getDashboardPlacement(options);
     const metrics = getScaledMetrics(placement.bounds);
@@ -497,6 +524,8 @@ module.exports = function initDashboard(ctx) {
         moveTextScaleTimer = null;
       }
       programmaticEventBounds = null;
+      dashboardRendererReady = false;
+      pendingQuickSelect = false;
       dashboardWindow = null;
     });
     return dashboardWindow;
@@ -527,8 +556,10 @@ module.exports = function initDashboard(ctx) {
       dashboardWindow.focus();
       sendI18n();
       sendSnapshot();
+      updateQuickSelectIntent(options);
       return dashboardWindow;
     }
+    updateQuickSelectIntent(options);
     return createDashboardWindow(options);
   }
 
@@ -569,6 +600,7 @@ module.exports = function initDashboard(ctx) {
     showDashboard,
     broadcastSessionSnapshot,
     sendI18n,
+    consumeQuickSelectIntent,
     getWindow: () => dashboardWindow,
     applyTextScaleToWindow,
   };

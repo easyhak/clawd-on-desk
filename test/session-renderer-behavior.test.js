@@ -31,39 +31,79 @@ class FakeElement {
     this.hidden = false;
     this.disabled = false;
     this.style = {};
+    this.parentNode = null;
+    this.ownerDocument = null;
   }
-  appendChild(child) { this.children.push(child); return child; }
-  replaceChildren(...children) { this.children = children; }
+  appendChild(child) {
+    if (child && typeof child === "object") child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+  replaceChildren(...children) {
+    this.children = [];
+    for (const child of children) this.appendChild(child);
+  }
   setAttribute(name, value) { this.attributes[name] = String(value); }
   addEventListener(name, listener) {
     if (!this.listeners.has(name)) this.listeners.set(name, []);
     this.listeners.get(name).push(listener);
   }
-  async dispatch(name) {
-    const event = { stopPropagation() {}, preventDefault() {}, key: "" };
+  async dispatch(name, overrides = {}) {
+    const event = {
+      stopped: false,
+      prevented: false,
+      stopPropagation() { this.stopped = true; },
+      preventDefault() { this.prevented = true; },
+      key: "",
+      ...overrides,
+    };
     for (const listener of this.listeners.get(name) || []) await listener(event);
+    return event;
   }
   querySelector(selector) {
     if (!selector.startsWith(".")) return null;
     return byClass(this, selector.slice(1))[0] || null;
   }
   replaceWith() {}
-  focus() {}
+  contains(target) {
+    if (target === this) return true;
+    return descendants(this).includes(target);
+  }
+  focus() {
+    if (this.ownerDocument) this.ownerDocument.activeElement = this;
+  }
   select() {}
 }
 
 function createDocument(ids) {
-  const elements = new Map(ids.map((id) => [id, new FakeElement("div")]));
-  return {
+  const listeners = new Map();
+  const document = {
     title: "",
-    createElement: (tag) => new FakeElement(tag),
+    activeElement: null,
+    createElement: (tag) => {
+      const element = new FakeElement(tag);
+      element.ownerDocument = document;
+      return element;
+    },
     createTextNode: (text) => ({ textContent: String(text), children: [] }),
-    createDocumentFragment: () => new FakeElement("fragment"),
-    getElementById: (id) => elements.get(id) || null,
+    createDocumentFragment: () => document.createElement("fragment"),
+    getElementById: (id) => document.elements.get(id) || null,
     querySelectorAll: () => [],
     contains: () => true,
-    elements,
+    addEventListener(name, listener) {
+      if (!listeners.has(name)) listeners.set(name, []);
+      listeners.get(name).push(listener);
+    },
+    async dispatch(name, event = {}) {
+      for (const listener of listeners.get(name) || []) await listener(event);
+    },
+    elements: new Map(),
   };
+  for (const id of ids) {
+    const element = document.createElement("div");
+    document.elements.set(id, element);
+  }
+  return document;
 }
 
 function descendants(root) {
@@ -116,6 +156,11 @@ function translations() {
     dashboardKimiQuotaRefreshFailed: "Refresh failed: {reason}",
     dashboardKimiQuotaEmpty: "No quota data yet. Click refresh to fetch it.",
     dashboardKimiQuotaRefreshShort: "Refresh",
+    dashboardQuickSelectTitle: "Quick Select",
+    dashboardQuickSelectHint: "Press 1–9 to jump · Esc to exit",
+    dashboardQuickSelectEmpty: "No focusable sessions are available.",
+    dashboardQuickSelectUnavailable: "This session is no longer available.",
+    dashboardQuickSelectAlreadyRequested: "A jump to this session was already requested.",
   };
 }
 
@@ -147,14 +192,37 @@ async function loadDashboard(
     "count",
     "content",
     "quotaSummary",
+    "quickSelectLayer",
+    "quickSelectTitle",
+    "quickSelectHint",
+    "quickSelectOptions",
+    "quickSelectFeedback",
   ]);
   const openCalls = [];
   const automationCalls = [];
   const kimiRefreshCalls = [];
+  const quickSelectActivationCalls = [];
   let renderInterval = null;
+  let snapshotListener = null;
+  let quickSelectIntentListener = null;
+  let quickSelectExitListener = null;
+  let pendingQuickSelectIntent = kimiOptions.quickSelectIntent === true;
   const api = {
     onLangChange: () => {},
-    onSessionSnapshot: () => {},
+    onSessionSnapshot: (listener) => { snapshotListener = listener; },
+    onQuickSelectIntent: (listener) => { quickSelectIntentListener = listener; },
+    onQuickSelectExit: (listener) => { quickSelectExitListener = listener; },
+    consumeQuickSelectIntent: async () => {
+      const enterQuickSelect = pendingQuickSelectIntent;
+      pendingQuickSelectIntent = false;
+      return { status: "ok", enterQuickSelect };
+    },
+    activateQuickSelectSession: async (payload) => {
+      quickSelectActivationCalls.push(payload);
+      return typeof kimiOptions.quickSelectActivationResult === "function"
+        ? kimiOptions.quickSelectActivationResult(payload)
+        : (kimiOptions.quickSelectActivationResult || { status: "submitted" });
+    },
     getI18n: async () => ({ lang: "en", translations: translations() }),
     getSnapshot: async () => ({
       sessions,
@@ -192,9 +260,18 @@ async function loadDashboard(
       return kimiOptions.refreshResult || { status: "ok" };
     },
   };
+  const windowListeners = new Map();
+  const fakeWindow = {
+    dashboardAPI: api,
+    addEventListener(name, listener) {
+      if (!windowListeners.has(name)) windowListeners.set(name, []);
+      windowListeners.get(name).push(listener);
+    },
+  };
   const context = vm.createContext({
-    window: { dashboardAPI: api }, document, console, Intl, Date,
+    window: fakeWindow, document, console, Intl, Date,
     setInterval: (callback) => { renderInterval = callback; return 1; },
+    setTimeout: (callback) => { callback(); return 1; },
     requestAnimationFrame: (cb) => cb(),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "src", "session-focus-unavailable.js"), "utf8"), context);
@@ -203,9 +280,31 @@ async function loadDashboard(
   return {
     root: document.elements.get("content"),
     quotaSummary: document.elements.get("quotaSummary"),
+    quickSelectLayer: document.elements.get("quickSelectLayer"),
+    quickSelectOptions: document.elements.get("quickSelectOptions"),
+    quickSelectFeedback: document.elements.get("quickSelectFeedback"),
     openCalls,
     automationCalls,
     kimiRefreshCalls,
+    quickSelectActivationCalls,
+    pushSnapshot: async (nextSessions, nextOverrides = {}) => {
+      snapshotListener({
+        sessions: nextSessions,
+        groups: [{ host: "", ids: nextSessions.map((entry) => entry.id) }],
+        ...nextOverrides,
+      });
+      await flush();
+    },
+    triggerQuickSelect: async () => {
+      pendingQuickSelectIntent = true;
+      quickSelectIntentListener();
+      await flush();
+    },
+    exitQuickSelect: () => quickSelectExitListener(),
+    blurWindow: async () => {
+      for (const listener of windowListeners.get("blur") || []) await listener();
+    },
+    pointerDown: async (target) => document.dispatch("pointerdown", { target }),
     tickRender: () => { if (renderInterval) renderInterval(); },
   };
 }
@@ -267,6 +366,78 @@ test("Dashboard renders local/remote/webui reasons and only local folder action"
     "WebUI sessions do not have a local terminal window.",
   ]);
   assert.strictEqual(byClass(root, "open-folder-button").length, 1);
+});
+
+test("Dashboard Quick Select keeps digit mapping stable while the live order changes", async () => {
+  const dashboard = await loadDashboard(
+    [
+      session("a", { canFocus: true, displayTitle: "Alpha", agentId: "codex" }),
+      session("b", { canFocus: true, displayTitle: "Beta", agentId: "claude-code" }),
+      session("c", { canFocus: false, displayTitle: "Gamma" }),
+    ],
+    { status: "ok" },
+    {},
+    { status: "applied" },
+    { quickSelectIntent: true }
+  );
+
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, false);
+  assert.deepStrictEqual(
+    byClass(dashboard.quickSelectOptions, "quick-select-option-title")
+      .map((element) => element.textContent),
+    ["Alpha", "Beta"]
+  );
+
+  await dashboard.pushSnapshot([
+    session("b", { canFocus: true, displayTitle: "Beta", agentId: "claude-code" }),
+    session("a", { canFocus: true, displayTitle: "Alpha", agentId: "codex" }),
+  ]);
+  await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  await flush();
+
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 1);
+  assert.strictEqual(dashboard.quickSelectActivationCalls[0].sessionId, "a");
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
+});
+
+test("Dashboard Quick Select keeps stale digits unavailable and exits without trapping focus", async () => {
+  const dashboard = await loadDashboard(
+    [
+      session("a", { canFocus: true, displayTitle: "Alpha" }),
+      session("b", { canFocus: true, displayTitle: "Beta" }),
+    ],
+    { status: "ok" },
+    {},
+    { status: "applied" },
+    { quickSelectIntent: true }
+  );
+
+  await dashboard.pushSnapshot([
+    session("b", { canFocus: true, displayTitle: "Beta" }),
+  ]);
+  await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  await flush();
+  assert.deepStrictEqual(dashboard.quickSelectActivationCalls, []);
+  assert.strictEqual(
+    dashboard.quickSelectFeedback.textContent,
+    "This session is no longer available."
+  );
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, false);
+
+  await dashboard.quickSelectLayer.dispatch("keydown", { key: "Escape" });
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
+
+  await dashboard.triggerQuickSelect();
+  await dashboard.quickSelectLayer.dispatch("keydown", { key: "Tab" });
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
+
+  await dashboard.triggerQuickSelect();
+  await dashboard.pointerDown(dashboard.root);
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
+
+  await dashboard.triggerQuickSelect();
+  await dashboard.blurWindow();
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
 });
 
 test("Dashboard hosts the manual Kimi quota refresh inside the Kimi quota section", async () => {
