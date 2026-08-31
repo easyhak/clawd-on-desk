@@ -3250,7 +3250,19 @@ html, body {
 }
 .anim-override-slider-row input[type="number"] {
   width: 76px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  padding: 4px 6px;
+  font: inherit;
+  font-size: 12px;
   text-align: center;
+}
+.anim-override-slider-row input[type="number"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 .anim-override-slider-unit {
   color: var(--text-tertiary);

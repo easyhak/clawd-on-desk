@@ -622,6 +622,33 @@ class FakeElement {
   }
 }
 
+let nextFakeSettingRowId = 1;
+function buildFakeSettingRow(document, config = {}) {
+  const element = document.createElement("div");
+  element.className = ["row", config.className || ""].filter(Boolean).join(" ");
+  const textElement = document.createElement("div");
+  textElement.className = "row-text";
+  const labelElement = document.createElement("span");
+  labelElement.className = "row-label";
+  labelElement.id = `fake-row-label-${nextFakeSettingRowId++}`;
+  labelElement.textContent = config.label != null ? String(config.label) : (config.labelKey || "");
+  textElement.appendChild(labelElement);
+  let descriptionElement = null;
+  const description = config.description != null ? String(config.description) : (config.descriptionKey || "");
+  if (description) {
+    descriptionElement = document.createElement("span");
+    descriptionElement.className = "row-desc";
+    descriptionElement.id = `fake-row-description-${nextFakeSettingRowId++}`;
+    descriptionElement.textContent = description;
+    textElement.appendChild(descriptionElement);
+  }
+  const controlElement = document.createElement("div");
+  controlElement.className = ["row-control", config.controlClassName || ""].filter(Boolean).join(" ");
+  element.appendChild(textElement);
+  element.appendChild(controlElement);
+  return { element, textElement, labelElement, descriptionElement, controlElement };
+}
+
 function loadRecapTabForTest({ data, agentMetadata = [], queryRecap } = {}) {
   const body = new FakeElement("body");
   const content = new FakeElement("main");
@@ -1885,6 +1912,7 @@ function loadTelegramApprovalTabForTest({
     runtime: {},
     helpers: {
       t: (key) => key,
+      buildSettingRow: (config) => buildFakeSettingRow(document, config),
       buildTextInput: (config) => buildFakeTextInput(document, config),
       setTextInputState: setFakeTextInputState,
       showSettingsConfirmModal: showConfirmModal,
@@ -2195,6 +2223,7 @@ function loadDiscordPresenceTabForTest({ snapshot, update } = {}) {
     },
     helpers: {
       t: (key) => key,
+      buildSettingRow: (config) => buildFakeSettingRow(document, config),
       buildTextInput: (config) => buildFakeTextInput(document, config),
       setTextInputState: setFakeTextInputState,
       buildSection: (_title, rows) => {
@@ -2328,7 +2357,10 @@ function assertVisibleFeishuLookupPreflight(card, lookupButton, expectedMessage)
   assert.equal(status.getAttribute("role"), "status");
   assert.equal(status.getAttribute("aria-live"), "polite");
   assert.equal(status.getAttribute("aria-atomic"), "true");
-  assert.equal(input.getAttribute("aria-describedby"), status.id);
+  const describedByIds = String(input.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+  assert.ok(describedByIds.includes(status.id));
+  assert.ok(describedByIds.some((id) => id !== status.id),
+    "the field keeps its row description while adding preflight status");
   assert.equal(input.getAttribute("aria-invalid"), valueInvalid ? "true" : "false");
   assert.equal(lookupButton.getAttribute("aria-describedby"), status.id);
   assert.equal(lookupButton.title, "", "visible status must replace title-only feedback");
@@ -2964,7 +2996,9 @@ describe("settings renderer browser environment", () => {
 
     assert.equal(input.value, "");
     assert.equal(input.getAttribute("aria-invalid"), "false");
-    assert.equal(input.getAttribute("aria-describedby"), undefined);
+    const initialDescriptionIds = String(input.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    assert.equal(initialDescriptionIds.length, 1, "the untouched field is described only by its row hint");
+    assert.notEqual(initialDescriptionIds[0], status.id);
     assert.equal(status.getAttribute("hidden") == null, true);
     assert.equal(status.textContent, "");
     assert.equal(saveButton.disabled, false);
@@ -3115,7 +3149,8 @@ describe("settings renderer browser environment", () => {
     assert.equal(lookupButton.disabled, false);
     assert.equal(status.getAttribute("hidden") == null, true);
     assert.equal(status.textContent, "");
-    assert.equal(input.getAttribute("aria-describedby"), undefined);
+    assert.ok(input.getAttribute("aria-describedby"), "the field keeps its row hint after preflight clears");
+    assert.notEqual(input.getAttribute("aria-describedby"), status.id);
     assert.equal(input.getAttribute("aria-invalid"), "false");
     assert.equal(lookupButton.getAttribute("aria-describedby"), undefined);
     lookupButton.dispatchEvent({ type: "click" });
@@ -3179,7 +3214,7 @@ describe("settings renderer browser environment", () => {
     );
     assert.equal(pendingStatus.textContent, "feishuApprovalLookupMissingContactScope");
     assert.equal(pendingStatus.getAttribute("hidden") == null, true);
-    assert.equal(pendingInput.getAttribute("aria-describedby"), pendingStatus.id);
+    assert.ok(String(pendingInput.getAttribute("aria-describedby")).split(/\s+/).includes(pendingStatus.id));
     assert.equal(cancelButton.disabled, true);
     assert.equal(harness.renderRequests.length, renderRequestCount);
 
@@ -5743,7 +5778,10 @@ describe("settings renderer browser environment", () => {
       const returnedInput = returnedCard.querySelectorAll("input").at(-1);
       const returnedStatus = returnedCard.querySelector(".feishu-approval-lookup-preflight-status");
       assert.equal(returnedInput.value, "");
-      assert.equal(returnedInput.getAttribute("aria-describedby"), undefined);
+      const returnedDescriptionIds = String(returnedInput.getAttribute("aria-describedby") || "")
+        .split(/\s+/).filter(Boolean);
+      assert.equal(returnedDescriptionIds.length, 1);
+      assert.notEqual(returnedDescriptionIds[0], returnedStatus.id);
       assert.equal(returnedStatus.textContent, "");
     }
   });
@@ -6372,7 +6410,8 @@ describe("settings renderer browser environment", () => {
         retryInput.value = "retry@example.com";
         retryInput.dispatchEvent({ type: "input" });
         assert.equal(resultStatus.textContent, "", `${platform}/${code} should clear on input`);
-        assert.equal(retryInput.getAttribute("aria-describedby"), undefined);
+        assert.ok(retryInput.getAttribute("aria-describedby"));
+        assert.notEqual(retryInput.getAttribute("aria-describedby"), resultStatus.id);
       }
     }
   });
@@ -9251,6 +9290,92 @@ describe("settings renderer browser environment", () => {
     assert.notEqual(passiveEnter.defaultPrevented, true, "Enter remains untouched without an onEnter callback");
   });
 
+  it("builds Setting rows with stable label and description relationships", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const first = core.helpers.buildSettingRow({
+      label: "Host",
+      description: "Remote host name",
+      className: "remote-row",
+      controlClassName: "remote-control",
+    });
+    const second = core.helpers.buildSettingRow({ label: "Port" });
+
+    assert.equal(first.element.classList.contains("row"), true);
+    assert.equal(first.element.classList.contains("remote-row"), true);
+    assert.equal(first.textElement.classList.contains("row-text"), true);
+    assert.equal(first.labelElement.textContent, "Host");
+    assert.equal(first.descriptionElement.textContent, "Remote host name");
+    assert.equal(first.controlElement.classList.contains("row-control"), true);
+    assert.equal(first.controlElement.classList.contains("remote-control"), true);
+    assert.notEqual(first.labelElement.id, second.labelElement.id);
+    assert.equal(second.descriptionElement, null, "description-less rows do not mount an empty node");
+  });
+
+  it("controls Form Field state axes, validation relationships, callbacks, and disposal independently", () => {
+    const document = {
+      body: new FakeElement("body"),
+      createElement: (tagName) => new FakeElement(tagName),
+      getElementById: () => null,
+    };
+    const core = loadSettingsCoreForTest({}, { document });
+    const calls = [];
+    const field = core.helpers.buildFormField({
+      type: "search",
+      value: "draft",
+      ariaLabelledBy: "field-label",
+      ariaDescribedBy: "field-help",
+      stopPropagation: true,
+      disabled: true,
+      pending: true,
+      onInput: ({ value }) => calls.push(value),
+    });
+
+    assert.equal(field.element.classList.contains("settings-form-field"), true);
+    assert.equal(field.element.getAttribute("aria-labelledby"), "field-label");
+    assert.equal(field.element.getAttribute("aria-describedby"), "field-help");
+    assert.equal(field.element.disabled, true);
+    assert.equal(field.element.getAttribute("aria-busy"), "true");
+    field.setState({ pending: false });
+    assert.equal(field.element.disabled, true, "ending pending does not clear business disabled");
+    field.setState({
+      disabled: false,
+      invalid: true,
+      validationMessage: "Host is required",
+    });
+    assert.equal(field.element.disabled, false);
+    assert.equal(field.element.getAttribute("aria-invalid"), "true");
+    assert.equal(field.validationElement.textContent, "Host is required");
+    assert.equal(field.validationElement.hidden, false);
+    assert.equal(field.element.getAttribute("aria-describedby"), `field-help ${field.validationElement.id}`);
+
+    field.element.value = "new draft";
+    field.setState({ invalid: false });
+    assert.equal(field.getValue(), "new draft", "unspecified value does not overwrite an active draft");
+    field.element.dispatchEvent({ type: "input" });
+    assert.deepStrictEqual(calls, ["new draft"]);
+    field.setState({ validationMessage: "" });
+    assert.equal(field.element.getAttribute("aria-describedby"), "field-help",
+      "clearing validation keeps the row description relationship");
+
+    field.dispose();
+    field.element.value = "ignored";
+    field.element.dispatchEvent({ type: "input" });
+    assert.deepStrictEqual(calls, ["new draft"], "disposed fields remove their callbacks");
+    assert.equal(core.state.mountedControls.formFields.size, 0);
+    const rerenderedField = core.helpers.buildFormField({ ariaLabel: "Rerendered field" });
+    assert.equal(core.state.mountedControls.formFields.size, 1);
+    core.ops.clearMountedControls();
+    rerenderedField.element.dispatchEvent({ type: "input" });
+    assert.equal(core.state.mountedControls.formFields.size, 0,
+      "Settings rerenders dispose every mounted Form Field controller");
+    assert.throws(() => core.helpers.buildFormField({ type: "text" }), /ariaLabel or ariaLabelledBy/);
+  });
+
   it("routes every Settings single-line text surface through the shared primitive", () => {
     const files = [
       "settings-tab-agents.js",
@@ -9261,12 +9386,29 @@ describe("settings renderer browser environment", () => {
     ];
     for (const file of files) {
       const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
-      assert.ok(source.includes("buildTextInput({"), `${file} should use buildTextInput`);
+      assert.ok(source.includes("buildTextInput({"), `${file} should use the compatibility adapter`);
       assert.doesNotMatch(source, /document\.createElement\("input"\)/, `${file} should not create raw inputs`);
     }
+    const coreSource = fs.readFileSync(SETTINGS_UI_CORE, "utf8");
+    assert.ok(coreSource.includes("function buildFormField(config = {})"));
+    assert.ok(coreSource.includes("function buildSettingRow(config = {})"));
+    assert.ok(coreSource.includes("const control = buildFormField({"),
+      "the compatibility adapter must route through the Form Field controller");
+    assert.ok(coreSource.includes("state.mountedControls.formFields.add(control)"));
+    assert.ok(coreSource.includes("state.mountedControls.formFields.delete(control)"));
+    for (const file of [
+      "settings-tab-agents.js",
+      "settings-tab-discord-presence.js",
+      "settings-tab-telegram-approval.js",
+    ]) {
+      const source = fs.readFileSync(path.join(SRC_DIR, file), "utf8");
+      assert.ok(source.includes("buildSettingRow({"), `${file} should compose standard fields with Setting Row`);
+    }
     const animSource = fs.readFileSync(path.join(SRC_DIR, "settings-tab-anim-overrides.js"), "utf8");
-    assert.ok(animSource.includes('type: "number"'));
-    assert.ok(animSource.includes('className: "anim-override-number-input"'));
+    assert.match(animSource, /const range = document\.createElement\("input"\);[\s\S]*range\.type = "range";/,
+      "Range remains a documented P2 exception");
+    assert.match(animSource, /const number = document\.createElement\("input"\);[\s\S]*number\.type = "number";/,
+      "the number input paired with Range remains in the Range contract");
     const css = fs.readFileSync(SETTINGS_CSS, "utf8");
     assert.match(css, /\.settings-text-input\s*\{[\s\S]*border-radius:\s*8px;[\s\S]*background:\s*var\(--panel-bg\);/);
     assert.match(css, /\.settings-text-input:focus\s*\{[\s\S]*var\(--accent\)/);

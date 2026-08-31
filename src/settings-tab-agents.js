@@ -2086,29 +2086,21 @@
     placeholderKey,
     value,
   }) {
-    const row = document.createElement("div");
-    row.className = "row row-sub agent-text-input-row";
-
-    const text = document.createElement("div");
-    text.className = "row-text";
-    const label = document.createElement("span");
-    label.className = "row-label";
-    label.textContent = t(labelKey);
-    text.appendChild(label);
-    const desc = document.createElement("span");
-    desc.className = "row-desc";
-    desc.textContent = t(descKey);
-    text.appendChild(desc);
-    row.appendChild(text);
-
-    const ctrl = document.createElement("div");
-    ctrl.className = "row-control agent-text-input-control";
+    const rowParts = helpers.buildSettingRow({
+      labelKey,
+      descriptionKey: descKey,
+      className: "row-sub agent-text-input-row",
+      controlClassName: "agent-text-input-control",
+    });
+    const row = rowParts.element;
+    const ctrl = rowParts.controlElement;
     const input = helpers.buildTextInput({
       type: "text",
       value: typeof value === "function" ? value() : "",
       placeholder: t(placeholderKey),
       spellcheck: false,
-      ariaLabel: t(labelKey),
+      labelledBy: rowParts.labelElement.id,
+      describedBy: rowParts.descriptionElement ? rowParts.descriptionElement.id : null,
       stopPropagation: true,
       onEnter: () => input.blur(),
       onInput: (event) => helpers.setTextInputState(event.currentTarget, { invalid: false }),
@@ -2117,7 +2109,6 @@
       saveAgentTextInput(input, { agentId, command });
     });
     ctrl.appendChild(input);
-    row.appendChild(ctrl);
     row._settingsInput = input;
     row._settingsControl = ctrl;
     return row;

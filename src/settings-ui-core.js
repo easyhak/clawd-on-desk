@@ -89,6 +89,7 @@
       roamArea: null,
       settingsSelects: new Set(),
       segmentedRadios: new Set(),
+      formFields: new Set(),
       disposableScopes: new Map(),
       quotaRingDisplayMode: null,
       permissionAutomationMode: null,
@@ -402,6 +403,191 @@
     return button;
   }
 
+  let nextSettingsDomId = 1;
+  function createSettingsDomId(suffix) {
+    const id = nextSettingsDomId++;
+    return `settings-${suffix}-${id}`;
+  }
+
+  // Shared layout primitive for ordinary Settings rows. It deliberately owns
+  // only structure and accessible relationships; feature tabs still own the
+  // contents placed into the text and control slots.
+  function buildSettingRow(config = {}) {
+    const element = document.createElement("div");
+    element.className = ["row", config.className || ""].filter(Boolean).join(" ");
+
+    const textElement = document.createElement("div");
+    textElement.className = "row-text";
+    const labelElement = document.createElement("span");
+    labelElement.className = "row-label";
+    labelElement.id = createSettingsDomId("row-label");
+    labelElement.textContent = config.label != null
+      ? String(config.label)
+      : (config.labelKey ? t(config.labelKey) : "");
+    textElement.appendChild(labelElement);
+
+    let descriptionElement = null;
+    const description = config.description != null
+      ? String(config.description)
+      : (config.descriptionKey ? t(config.descriptionKey) : "");
+    if (description) {
+      descriptionElement = document.createElement("span");
+      descriptionElement.className = "row-desc";
+      descriptionElement.id = createSettingsDomId("row-description");
+      descriptionElement.textContent = description;
+      textElement.appendChild(descriptionElement);
+    }
+
+    const controlElement = document.createElement("div");
+    controlElement.className = ["row-control", config.controlClassName || ""]
+      .filter(Boolean).join(" ");
+    element.appendChild(textElement);
+    element.appendChild(controlElement);
+    return { element, textElement, labelElement, descriptionElement, controlElement };
+  }
+
+  function buildFormField(config = {}) {
+    const supportedTypes = new Set(["text", "password", "number", "search"]);
+    const type = config.type || "text";
+    if (!supportedTypes.has(type)) throw new Error(`Unsupported Settings form field type: ${type}`);
+    const ariaLabel = config.ariaLabel != null ? String(config.ariaLabel) : "";
+    const ariaLabelledBy = config.ariaLabelledBy || config.labelledBy;
+    if (!ariaLabel && !ariaLabelledBy) {
+      throw new Error("Settings form fields require ariaLabel or ariaLabelledBy");
+    }
+
+    const element = document.createElement("input");
+    const size = config.size === "compact" ? "compact" : "regular";
+    element.type = type;
+    element.className = [
+      "settings-form-field",
+      "settings-text-input",
+      `settings-text-input-${size}`,
+      config.className || "",
+    ].filter(Boolean).join(" ");
+    if (config.placeholder != null) element.placeholder = String(config.placeholder);
+    if (config.autocomplete != null) element.autocomplete = String(config.autocomplete);
+    if (config.spellcheck != null) element.spellcheck = config.spellcheck === true;
+    if (config.inputMode != null) element.inputMode = String(config.inputMode);
+    if (config.maxLength != null) element.maxLength = Number(config.maxLength);
+    if (config.pattern != null) element.pattern = String(config.pattern);
+    for (const key of ["min", "max", "step"]) {
+      if (config[key] != null) element[key] = String(config[key]);
+    }
+
+    const validationElement = document.createElement("span");
+    validationElement.id = createSettingsDomId("field-validation");
+    validationElement.className = "settings-form-field-validation";
+    validationElement.hidden = true;
+
+    let disposed = false;
+    const listeners = [];
+    const fieldState = {
+      disabled: false,
+      pending: false,
+      invalid: false,
+      ariaLabel,
+      ariaLabelledBy: ariaLabelledBy ? String(ariaLabelledBy) : "",
+      ariaDescribedBy: config.ariaDescribedBy || config.describedBy || "",
+      validationMessage: "",
+    };
+
+    function addListener(typeName, listener) {
+      if (typeof listener !== "function") return;
+      element.addEventListener(typeName, listener);
+      listeners.push([typeName, listener]);
+    }
+
+    function syncAccessibleDescription() {
+      const ids = String(fieldState.ariaDescribedBy || "").split(/\s+/).filter(Boolean);
+      if (fieldState.validationMessage) ids.push(validationElement.id);
+      const describedBy = [...new Set(ids)].join(" ");
+      if (describedBy) element.setAttribute("aria-describedby", describedBy);
+      else element.removeAttribute("aria-describedby");
+    }
+
+    const control = {
+      element,
+      validationElement,
+      getValue() {
+        return element.value;
+      },
+      setState(patch = {}) {
+        if (disposed) return control;
+        if (Object.prototype.hasOwnProperty.call(patch, "value")) {
+          const nextValue = patch.value == null ? "" : String(patch.value);
+          if (element.value !== nextValue) element.value = nextValue;
+        }
+        for (const key of ["disabled", "pending", "invalid"]) {
+          if (Object.prototype.hasOwnProperty.call(patch, key)) fieldState[key] = patch[key] === true;
+        }
+        for (const key of ["ariaLabel", "ariaLabelledBy", "ariaDescribedBy", "validationMessage"]) {
+          if (Object.prototype.hasOwnProperty.call(patch, key)) {
+            fieldState[key] = patch[key] == null ? "" : String(patch[key]);
+          }
+        }
+        element.disabled = fieldState.disabled;
+        element.classList.toggle("disabled", fieldState.disabled);
+        element.classList.toggle("pending", fieldState.pending);
+        element.classList.toggle("invalid", fieldState.invalid);
+        element.setAttribute("aria-disabled", fieldState.disabled ? "true" : "false");
+        element.setAttribute("aria-busy", fieldState.pending ? "true" : "false");
+        element.setAttribute("aria-invalid", fieldState.invalid ? "true" : "false");
+        if (fieldState.ariaLabel) element.setAttribute("aria-label", fieldState.ariaLabel);
+        else element.removeAttribute("aria-label");
+        if (fieldState.ariaLabelledBy) element.setAttribute("aria-labelledby", fieldState.ariaLabelledBy);
+        else element.removeAttribute("aria-labelledby");
+        validationElement.textContent = fieldState.validationMessage;
+        validationElement.hidden = !fieldState.validationMessage;
+        syncAccessibleDescription();
+        return control;
+      },
+      focus() {
+        if (!disposed) element.focus();
+      },
+      dispose() {
+        if (disposed) return;
+        disposed = true;
+        for (const [typeName, listener] of listeners) element.removeEventListener(typeName, listener);
+        listeners.length = 0;
+        state.mountedControls.formFields.delete(control);
+      },
+    };
+
+    const callbackFor = (name) => (event) => {
+      if (!disposed && typeof config[name] === "function") {
+        config[name]({ value: element.value, event, control });
+      }
+    };
+    addListener("input", callbackFor("onInput"));
+    addListener("change", callbackFor("onChange"));
+    addListener("focus", callbackFor("onFocus"));
+    addListener("blur", callbackFor("onBlur"));
+    addListener("click", (event) => {
+      if (config.stopPropagation === true) event.stopPropagation();
+    });
+    addListener("keydown", (event) => {
+      if (config.stopPropagation === true) event.stopPropagation();
+      if (typeof config.onKeyDown === "function") {
+        config.onKeyDown({ value: element.value, event, control });
+      }
+    });
+
+    element._settingsFormFieldControl = control;
+    control.setState({
+      value: config.value,
+      disabled: config.disabled,
+      pending: config.pending,
+      invalid: config.invalid,
+      ariaLabel,
+      ariaLabelledBy,
+      ariaDescribedBy: config.ariaDescribedBy || config.describedBy,
+      validationMessage: config.validationMessage,
+    });
+    state.mountedControls.formFields.add(control);
+    return control;
+  }
+
   function setTextInputState(input, nextState = {}) {
     if (!input) return input;
     const previous = input._settingsTextInputState || {
@@ -418,55 +604,51 @@
       state.lockWhilePending = nextState.lockWhilePending !== false;
     }
     input._settingsTextInputState = state;
-    input.disabled = state.disabled || (state.pending && state.lockWhilePending);
-    input.classList.toggle("pending", state.pending);
-    input.classList.toggle("invalid", state.invalid);
-    input.setAttribute("aria-busy", state.pending ? "true" : "false");
-    input.setAttribute("aria-invalid", state.invalid ? "true" : "false");
-    if (Object.prototype.hasOwnProperty.call(nextState, "describedBy")) {
-      if (nextState.describedBy) input.setAttribute("aria-describedby", String(nextState.describedBy));
-      else input.removeAttribute("aria-describedby");
+    const control = input._settingsFormFieldControl;
+    if (control && typeof control.setState === "function") {
+      const patch = {
+        disabled: state.disabled || (state.pending && state.lockWhilePending),
+        pending: state.pending,
+        invalid: state.invalid,
+      };
+      if (Object.prototype.hasOwnProperty.call(nextState, "describedBy")) {
+        patch.ariaDescribedBy = nextState.describedBy;
+      }
+      control.setState(patch);
     }
     return input;
   }
 
   function buildTextInput(config = {}) {
-    const input = document.createElement("input");
-    const size = config.size === "compact" ? "compact" : "regular";
-    input.type = config.type || "text";
-    input.className = [
-      "settings-text-input",
-      `settings-text-input-${size}`,
-      config.className || "",
-    ].filter(Boolean).join(" ");
-    if (config.value != null) input.value = String(config.value);
-    if (config.placeholder != null) input.placeholder = String(config.placeholder);
-    if (config.autocomplete != null) input.autocomplete = String(config.autocomplete);
-    if (config.spellcheck != null) input.spellcheck = config.spellcheck === true;
-    if (config.inputMode != null) input.inputMode = String(config.inputMode);
-    if (config.maxLength != null) input.maxLength = Number(config.maxLength);
-    if (config.pattern != null) input.pattern = String(config.pattern);
-    if (config.ariaLabel) input.setAttribute("aria-label", String(config.ariaLabel));
-    if (config.labelledBy) input.setAttribute("aria-labelledby", String(config.labelledBy));
-    if (config.describedBy) input.setAttribute("aria-describedby", String(config.describedBy));
-
-    if (typeof config.onInput === "function") input.addEventListener("input", config.onInput);
-    if (typeof config.onChange === "function") input.addEventListener("change", config.onChange);
-    if (typeof config.onBlur === "function") input.addEventListener("blur", config.onBlur);
-    if (config.stopPropagation === true) {
-      input.addEventListener("click", (event) => event.stopPropagation());
-    }
-    input.addEventListener("keydown", (event) => {
-      if (config.stopPropagation === true) event.stopPropagation();
-      if (
-        event.key !== "Enter"
-        || typeof config.onEnter !== "function"
-        || event.isComposing === true
-        || event.keyCode === 229
-      ) return;
-      event.preventDefault();
-      config.onEnter(event, input);
+    const control = buildFormField({
+      ...config,
+      ariaLabelledBy: config.ariaLabelledBy || config.labelledBy,
+      ariaDescribedBy: config.ariaDescribedBy || config.describedBy,
+      onInput: config.onInput
+        ? ({ event }) => config.onInput(event)
+        : null,
+      onChange: config.onChange
+        ? ({ event }) => config.onChange(event)
+        : null,
+      onFocus: config.onFocus
+        ? ({ event }) => config.onFocus(event)
+        : null,
+      onBlur: config.onBlur
+        ? ({ event }) => config.onBlur(event)
+        : null,
+      onKeyDown: ({ event }) => {
+        if (typeof config.onKeyDown === "function") config.onKeyDown(event);
+        if (
+          event.key !== "Enter"
+          || typeof config.onEnter !== "function"
+          || event.isComposing === true
+          || event.keyCode === 229
+        ) return;
+        event.preventDefault();
+        config.onEnter(event, control.element);
+      },
     });
+    const input = control.element;
     setTextInputState(input, {
       disabled: config.disabled,
       pending: config.pending,
@@ -1174,26 +1356,22 @@
     zeroLabelKey = null,
     debounceMs = NUMBER_INPUT_COMMIT_DELAY_MS,
   }) {
-    const row = document.createElement("div");
-    row.className = "row session-cleanup-row";
-    row.innerHTML =
-      `<div class="row-text">` +
-        `<span class="row-label"></span>` +
-        `<span class="row-desc"></span>` +
-      `</div>` +
-      `<div class="row-control session-cleanup-control"></div>`;
-    row.querySelector(".row-label").textContent = t(labelKey);
-    const descNode = row.querySelector(".row-desc");
-    if (descKey) descNode.textContent = t(descKey);
-    else descNode.remove();
-    const control = row.querySelector(".session-cleanup-control");
+    const rowParts = buildSettingRow({
+      labelKey,
+      descriptionKey: descKey,
+      className: "session-cleanup-row",
+      controlClassName: "session-cleanup-control",
+    });
+    const row = rowParts.element;
+    const control = rowParts.controlElement;
     const input = buildTextInput({
       type: "text",
       size: "compact",
       className: "bubble-policy-seconds session-cleanup-input",
       inputMode: "numeric",
       maxLength: String(max).length + 1,
-      ariaLabel: t(labelKey),
+      labelledBy: rowParts.labelElement.id,
+      describedBy: rowParts.descriptionElement ? rowParts.descriptionElement.id : null,
       onEnter: () => {
         clearCommitTimer();
         commitFromInput();
@@ -1356,6 +1534,10 @@
       if (control && typeof control.dispose === "function") control.dispose();
     }
     state.mountedControls.segmentedRadios.clear();
+    for (const control of [...state.mountedControls.formFields]) {
+      if (control && typeof control.dispose === "function") control.dispose();
+    }
+    state.mountedControls.formFields.clear();
     disposeMountedDisposables();
     state.mountedControls.generalSwitches.clear();
     state.mountedControls.bubblePolicyControls.clear();
@@ -2211,6 +2393,8 @@
   core.helpers = {
     t,
     buildButton,
+    buildSettingRow,
+    buildFormField,
     buildTextInput,
     setTextInputState,
     showSettingsDialog,
