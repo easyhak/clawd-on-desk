@@ -24,7 +24,7 @@ class FakeArea {
   setPointerCapture() {}
 }
 
-function createHarness({ isMac = false, sendState = {} } = {}) {
+function createHarness({ isMac = false, sendState = {}, dragDiagnostics = false } = {}) {
   const apiCalls = [];
   const apiHandlers = {};
   const area = new FakeArea();
@@ -47,6 +47,8 @@ function createHarness({ isMac = false, sendState = {} } = {}) {
     document: fakeDocument,
     window: {
       hitPlatform: { isMac, platform: isMac ? "darwin" : "win32" },
+      hitDiagnostics: { drag: dragDiagnostics },
+      devicePixelRatio: 1.25,
       hitThemeConfig: { reactions: {
         double: { file: "flail.svg", duration: 3500 },
         annoyed: { file: "annoyed.svg", duration: 3500 },
@@ -55,8 +57,8 @@ function createHarness({ isMac = false, sendState = {} } = {}) {
       } },
       hitAPI: {
         onThemeConfig: (cb) => { apiHandlers.themeConfig = cb; },
-        dragLock: (v) => apiCalls.push(["dragLock", v]),
-        dragMove: () => apiCalls.push(["dragMove"]),
+        dragLock: (...args) => apiCalls.push(["dragLock", ...args]),
+        dragMove: (...args) => apiCalls.push(["dragMove", ...args]),
         dragEnd: () => apiCalls.push(["dragEnd"]),
         showContextMenu: () => apiCalls.push(["showContextMenu"]),
         focusTerminal: () => apiCalls.push(["focusTerminal"]),
@@ -98,17 +100,46 @@ function createHarness({ isMac = false, sendState = {} } = {}) {
     apiHandlers.stateSync({ currentState: "idle", miniMode: false, dndEnabled: false });
   }
 
-  function pointerup({ button = 0, ctrlKey = false, metaKey = false, clientX = 100 } = {}) {
-    fakeDocument._dispatch("pointerup", { button, ctrlKey, metaKey, clientX });
+  function pointerup(overrides = {}) {
+    fakeDocument._dispatch("pointerup", {
+      button: 0,
+      ctrlKey: false,
+      metaKey: false,
+      clientX: 100,
+      clientY: 100,
+      screenX: 500,
+      screenY: 400,
+      movementX: 0,
+      movementY: 0,
+      ...overrides,
+    });
   }
 
-  function pointerdown({ button = 0, pointerId = 1, clientX = 100, clientY = 100 } = {}) {
+  function pointerdown(overrides = {}) {
     const cb = area.listeners.get("pointerdown");
-    if (cb) cb({ button, pointerId, clientX, clientY });
+    if (cb) cb({
+      button: 0,
+      pointerId: 1,
+      clientX: 100,
+      clientY: 100,
+      screenX: 500,
+      screenY: 400,
+      movementX: 0,
+      movementY: 0,
+      ...overrides,
+    });
   }
 
-  function pointermove({ clientX = 100, clientY = 100 } = {}) {
-    fakeDocument._dispatch("pointermove", { clientX, clientY });
+  function pointermove(overrides = {}) {
+    fakeDocument._dispatch("pointermove", {
+      clientX: 100,
+      clientY: 100,
+      screenX: 500,
+      screenY: 400,
+      movementX: 0,
+      movementY: 0,
+      ...overrides,
+    });
   }
 
   function fireTimer(predicate) {
@@ -233,6 +264,57 @@ describe("hit-renderer input layer", () => {
         ["startDragReaction", "right"],
       ]
     );
+  });
+
+  it("keeps the legacy drag IPC payload empty when diagnostics are disabled", () => {
+    const h = createHarness();
+    h.pointerdown();
+    h.pointermove({ clientX: 110, screenX: 510, movementX: 10 });
+    h.fireTimer((t) => t.ms === 16);
+    h.pointerup({ clientX: 110, screenX: 510 });
+
+    assert.deepStrictEqual(h.apiCalls.filter((call) => call[0] === "dragLock"), [
+      ["dragLock", true],
+      ["dragLock", false],
+    ]);
+    assert.deepStrictEqual(h.apiCalls.filter((call) => call[0] === "dragMove"), [
+      ["dragMove"],
+    ]);
+  });
+
+  it("coalesces opt-in drag diagnostics while preserving cumulative pointer movement", () => {
+    const h = createHarness({ dragDiagnostics: true });
+    h.pointerdown({ clientX: 10, clientY: 20, screenX: 110, screenY: 220 });
+    h.pointermove({ clientX: 15, clientY: 23, screenX: 115, screenY: 223, movementX: 5, movementY: 3 });
+    h.pointermove({ clientX: 20, clientY: 25, screenX: 120, screenY: 225, movementX: 5, movementY: 2 });
+    h.fireTimer((t) => t.ms === 16);
+    h.pointerup({ clientX: 20, clientY: 25, screenX: 120, screenY: 225 });
+
+    const calls = JSON.parse(JSON.stringify(
+      h.apiCalls.filter((call) => call[0] === "dragLock" || call[0] === "dragMove")
+    ));
+    assert.equal(calls[0][0], "dragLock");
+    assert.equal(calls[0][1], true);
+    assert.deepStrictEqual(calls[0][2], {
+      sequence: 1,
+      clientX: 10,
+      clientY: 20,
+      screenX: 110,
+      screenY: 220,
+      movementX: 0,
+      movementY: 0,
+      movementTotalX: null,
+      movementTotalY: null,
+      devicePixelRatio: 1.25,
+    });
+    assert.equal(calls[1][0], "dragMove");
+    assert.equal(calls[1][1].sequence, 3, "the RAF sends the newest coalesced sample");
+    assert.equal(calls[1][1].movementTotalX, 10);
+    assert.equal(calls[1][1].movementTotalY, 5);
+    assert.equal(calls[2][0], "dragLock");
+    assert.equal(calls[2][1], false);
+    assert.equal(calls[2][2].sequence, 4);
+    assert.equal(calls[2][2].screenX, 120);
   });
 
   for (const [terminalEvent, finishDrag] of [

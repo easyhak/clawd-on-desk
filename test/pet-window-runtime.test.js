@@ -2821,6 +2821,21 @@ describe("pet-window-runtime", () => {
       true,
       "pop-up-menu",
     ]);
+    assert.ok(!instances[0].options.webPreferences.additionalArguments.includes("--hit-drag-diagnostics=1"));
+  });
+
+  it("enables hit-renderer drag samples only for explicit window diagnostics", () => {
+    const instances = [];
+    const harness = createRuntime();
+    harness.runtime.createHitWindow({
+      BrowserWindow: makeBrowserWindow(instances),
+      preloadPath: "preload-hit.js",
+      loadFilePath: "hit.html",
+      hitThemeConfig: {},
+      dragDiagnosticsEnabled: true,
+    });
+
+    assert.ok(instances[0].options.webPreferences.additionalArguments.includes("--hit-drag-diagnostics=1"));
   });
 
   it("reloadWindowWebContents ignores destroyed windows and webContents", () => {
@@ -3243,6 +3258,55 @@ describe("pet-window-runtime", () => {
     ]);
     assert.ok(harness.calls.some((call) => call[0] === "reassertWinTopmost"));
     assert.ok(harness.calls.some((call) => call[0] === "repositionAnchoredSurfaces"));
+  });
+
+  it("compares renderer pointer movement with a stale Electron cursor in opt-in drag diagnostics", () => {
+    const logs = [];
+    const clock = createFakeClock(1_000);
+    const cursor = { x: 100, y: 100 };
+    const harness = createRuntime({
+      clock,
+      cursor: () => cursor,
+      edgeLog: (line) => logs.push(line),
+    });
+    const start = {
+      sequence: 1,
+      clientX: 20,
+      clientY: 30,
+      screenX: 200,
+      screenY: 300,
+      movementX: 0,
+      movementY: 0,
+      movementTotalX: null,
+      movementTotalY: null,
+      devicePixelRatio: 1.25,
+    };
+    const move = {
+      ...start,
+      sequence: 2,
+      clientX: 70,
+      screenX: 250,
+      movementX: 50,
+      movementTotalX: 50,
+      movementTotalY: 0,
+    };
+
+    harness.runtime.setDragLocked(true);
+    harness.runtime.beginDragSnapshot(start);
+    harness.runtime.moveWindowForDrag(move);
+    harness.runtime.moveWindowForDrag({ ...move, sequence: 3, screenX: 260 });
+    harness.runtime.clearDragSnapshot(move);
+
+    const entries = logs
+      .filter((line) => line.startsWith("Clawd: drag-diagnostic "))
+      .map((line) => JSON.parse(line.slice("Clawd: drag-diagnostic ".length)));
+    assert.deepStrictEqual(entries.map((entry) => entry.phase), ["start", "move", "end"]);
+    assert.deepStrictEqual(entries[1].pointerScreenDelta, { x: 50, y: 0 });
+    assert.deepStrictEqual(entries[1].pointerClientDelta, { x: 50, y: 0 });
+    assert.deepStrictEqual(entries[1].electronCursorDelta, { x: 0, y: 0 });
+    assert.deepStrictEqual(entries[1].targetBounds, { x: 10, y: 20, width: 100, height: 100 });
+    assert.deepStrictEqual(entries[1].nativeBounds, { x: 10, y: 20, width: 100, height: 100 });
+    assert.equal(entries[2].moveCount, 2, "the end record keeps the throttled move count");
   });
 
   it("preserves mini transition guards for drag and display changes", () => {

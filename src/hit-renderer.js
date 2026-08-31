@@ -10,6 +10,9 @@ let _reactions = (tc && tc.reactions) || {};
 
 // ── Platform (injected via preload-hit.js additionalArguments) ──
 const isMac = !!(window.hitPlatform && window.hitPlatform.isMac);
+// #752: collect pointer-coordinate evidence only for an explicit
+// CLAWD_WINDOW_DEBUG launch. The normal drag IPC remains payload-free.
+const dragDiagnosticsEnabled = !!(window.hitDiagnostics && window.hitDiagnostics.drag);
 
 // Theme switch: IPC push overrides additionalArguments
 if (window.hitAPI && window.hitAPI.onThemeConfig) {
@@ -40,6 +43,12 @@ let mouseDownX, mouseDownY;
 let lastDragClientX;
 let dragReactionDirection = null;
 let dragMoveRAF = null;
+let queuedDragDiagnosticSample;
+let lastDragDiagnosticSample = null;
+let dragDiagnosticSequence = 0;
+let dragDiagnosticMovementX = 0;
+let dragDiagnosticMovementY = 0;
+let dragDiagnosticMovementSeen = false;
 const DRAG_THRESHOLD = 3;
 
 // --- Reaction state (tracked here to gate input) ---
@@ -54,12 +63,50 @@ window.hitAPI.onCancelReaction(() => {
   dragReactionDirection = null;
 });
 
-function queueDragMove() {
+function finiteOrNull(value) {
+  return Number.isFinite(value) ? value : null;
+}
+
+function buildDragDiagnosticSample(event) {
+  if (!dragDiagnosticsEnabled || !event) return undefined;
+  const sample = {
+    sequence: ++dragDiagnosticSequence,
+    clientX: finiteOrNull(event.clientX),
+    clientY: finiteOrNull(event.clientY),
+    screenX: finiteOrNull(event.screenX),
+    screenY: finiteOrNull(event.screenY),
+    movementX: finiteOrNull(event.movementX),
+    movementY: finiteOrNull(event.movementY),
+    movementTotalX: dragDiagnosticMovementSeen ? dragDiagnosticMovementX : null,
+    movementTotalY: dragDiagnosticMovementSeen ? dragDiagnosticMovementY : null,
+    devicePixelRatio: finiteOrNull(window.devicePixelRatio),
+  };
+  lastDragDiagnosticSample = sample;
+  return sample;
+}
+
+function updateDragDiagnosticMovement(event) {
+  if (!dragDiagnosticsEnabled || !event) return;
+  if (Number.isFinite(event.movementX)) {
+    dragDiagnosticMovementX += event.movementX;
+    dragDiagnosticMovementSeen = true;
+  }
+  if (Number.isFinite(event.movementY)) {
+    dragDiagnosticMovementY += event.movementY;
+    dragDiagnosticMovementSeen = true;
+  }
+}
+
+function queueDragMove(diagnosticSample) {
+  if (dragDiagnosticsEnabled) queuedDragDiagnosticSample = diagnosticSample;
   if (dragMoveRAF !== null) return;
   dragMoveRAF = requestAnimationFrame(() => {
     dragMoveRAF = null;
     if (!isDragging) return;
-    window.hitAPI.dragMove();
+    const sample = queuedDragDiagnosticSample;
+    queuedDragDiagnosticSample = undefined;
+    if (sample === undefined) window.hitAPI.dragMove();
+    else window.hitAPI.dragMove(sample);
   });
 }
 
@@ -67,6 +114,7 @@ function clearQueuedDragMove() {
   if (dragMoveRAF === null) return;
   cancelAnimationFrame(dragMoveRAF);
   dragMoveRAF = null;
+  queuedDragDiagnosticSample = undefined;
 }
 
 // --- Pointer handlers ---
@@ -80,7 +128,14 @@ area.addEventListener("pointerdown", (e) => {
     mouseDownY = e.clientY;
     lastDragClientX = e.clientX;
     dragReactionDirection = null;
-    window.hitAPI.dragLock(true);
+    dragDiagnosticSequence = 0;
+    dragDiagnosticMovementX = 0;
+    dragDiagnosticMovementY = 0;
+    dragDiagnosticMovementSeen = false;
+    lastDragDiagnosticSample = null;
+    const diagnosticSample = buildDragDiagnosticSample(e);
+    if (diagnosticSample === undefined) window.hitAPI.dragLock(true);
+    else window.hitAPI.dragLock(true, diagnosticSample);
     area.classList.add("dragging");
   }
 });
@@ -99,15 +154,18 @@ document.addEventListener("pointermove", (e) => {
       if (stepDx !== 0) startDragReaction(stepDx < 0 ? "left" : "right");
     }
     lastDragClientX = e.clientX;
-    queueDragMove();
+    updateDragDiagnosticMovement(e);
+    queueDragMove(buildDragDiagnosticSample(e));
   }
 });
 
-function stopDrag() {
+function stopDrag(event) {
   if (!isDragging) return;
   clearQueuedDragMove();
   isDragging = false;
-  window.hitAPI.dragLock(false);
+  const endSample = buildDragDiagnosticSample(event) || lastDragDiagnosticSample;
+  if (endSample === undefined || endSample === null) window.hitAPI.dragLock(false);
+  else window.hitAPI.dragLock(false, endSample);
   area.classList.remove("dragging");
   if (didDrag) {
     window.hitAPI.dragEnd();
@@ -117,12 +175,13 @@ function stopDrag() {
   // received startDragReaction, so an actual drag must still complete the
   // end handshake on pointerup/cancel/lost capture/blur.
   endDragReaction(didDrag);
+  lastDragDiagnosticSample = null;
 }
 
 document.addEventListener("pointerup", (e) => {
   if (e.button !== 0) return;
   const wasDrag = didDrag;
-  stopDrag();
+  stopDrag(e);
   if (wasDrag) return;
 
   // macOS Ctrl-click is the system right-click gesture. Let the OS / our
@@ -145,8 +204,8 @@ document.addEventListener("pointerup", (e) => {
   handleClick(e.clientX);
 });
 
-area.addEventListener("pointercancel", () => stopDrag());
-area.addEventListener("lostpointercapture", () => { if (isDragging) stopDrag(); });
+area.addEventListener("pointercancel", (e) => stopDrag(e));
+area.addEventListener("lostpointercapture", (e) => { if (isDragging) stopDrag(e); });
 window.addEventListener("blur", stopDrag);
 
 // --- Click reaction logic (2-click = poke, 4-click = flail) ---

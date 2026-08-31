@@ -92,7 +92,11 @@ function registerPetInteractionIpc(options = {}) {
   }
 
   on("show-context-menu", showContextMenu);
-  on("drag-move", () => moveWindowForDrag());
+  on("drag-move", (_event, diagnosticSample) => (
+    diagnosticSample === undefined
+      ? moveWindowForDrag()
+      : moveWindowForDrag(diagnosticSample)
+  ));
   on("pet-visual-ready", (event) => recoverVisiblePetAfterRendererLoad(event));
   on("pet-visual-settled", (event, payload) => settleVisual(event, payload));
 
@@ -114,14 +118,16 @@ function registerPetInteractionIpc(options = {}) {
     setAccessoryMirror(!!mirrored);
   });
 
-  on("drag-lock", (_event, locked) => {
+  on("drag-lock", (_event, locked, diagnosticSample) => {
     setDragLocked(!!locked);
     if (locked) {
       setMouseOverPet(true);
       cancelRoam();
-      beginDragSnapshot();
+      if (diagnosticSample === undefined) beginDragSnapshot();
+      else beginDragSnapshot(diagnosticSample);
     } else {
-      clearDragSnapshot();
+      if (diagnosticSample === undefined) clearDragSnapshot();
+      else clearDragSnapshot(diagnosticSample);
       syncHitWin();
       syncDisplayedVisualGeometry();
       syncImeEditingPetDodge();

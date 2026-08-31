@@ -8,19 +8,32 @@ const hitThemeConfig = hitThemeArg ? JSON.parse(hitThemeArg.slice("--hit-theme-c
 // macOS-specific input semantics (Cmd vs Ctrl, Ctrl-click = right-click, etc.).
 const platformArg = process.argv.find(a => a.startsWith("--hit-platform="));
 const platform = platformArg ? platformArg.slice("--hit-platform=".length) : process.platform;
+// Main adds this private renderer argument only for CLAWD_WINDOW_DEBUG=1.
+const dragDiagnosticsEnabled = process.argv.includes("--hit-drag-diagnostics=1");
 
 contextBridge.exposeInMainWorld("hitThemeConfig", hitThemeConfig);
 contextBridge.exposeInMainWorld("hitPlatform", {
   isMac: platform === "darwin",
   platform,
 });
+contextBridge.exposeInMainWorld("hitDiagnostics", {
+  drag: dragDiagnosticsEnabled,
+});
 
 contextBridge.exposeInMainWorld("hitAPI", {
   // Theme config push (for hot-switch; additionalArguments won't update on reload)
   onThemeConfig: (cb) => ipcRenderer.on("theme-config", (_, cfg) => cb(cfg)),
   // Sends → main
-  dragLock: (locked) => ipcRenderer.send("drag-lock", locked),
-  dragMove: () => ipcRenderer.send("drag-move"),
+  dragLock: (locked, diagnosticSample) => (
+    diagnosticSample === undefined
+      ? ipcRenderer.send("drag-lock", locked)
+      : ipcRenderer.send("drag-lock", locked, diagnosticSample)
+  ),
+  dragMove: (diagnosticSample) => (
+    diagnosticSample === undefined
+      ? ipcRenderer.send("drag-move")
+      : ipcRenderer.send("drag-move", diagnosticSample)
+  ),
   dragEnd: () => ipcRenderer.send("drag-end"),
   showContextMenu: () => ipcRenderer.send("show-context-menu"),
   focusTerminal: () => ipcRenderer.send("focus-terminal"),

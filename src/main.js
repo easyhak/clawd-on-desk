@@ -1790,9 +1790,9 @@ function setLowPowerIdlePaused(value) {
   if (!next) setForceEyeResend(true);
 }
 
-function beginDragSnapshot() { return petWindowRuntime.beginDragSnapshot(); }
-function clearDragSnapshot() { return petWindowRuntime.clearDragSnapshot(); }
-function moveWindowForDrag() { return petWindowRuntime.moveWindowForDrag(); }
+function beginDragSnapshot(diagnosticSample) { return petWindowRuntime.beginDragSnapshot(diagnosticSample); }
+function clearDragSnapshot(diagnosticSample) { return petWindowRuntime.clearDragSnapshot(diagnosticSample); }
+function moveWindowForDrag(diagnosticSample) { return petWindowRuntime.moveWindowForDrag(diagnosticSample); }
 
 // Windows-only (#538 drag focus-steal): the topmost watchdog calls this each
 // tick with the inverse of the fullscreen state. While a fullscreen app owns
@@ -4795,6 +4795,7 @@ function createWindow() {
     preloadPath: path.join(__dirname, "preload-hit.js"),
     loadFilePath: path.join(__dirname, "hit.html"),
     hitThemeConfig: themeRuntime.getHitRendererConfig(),
+    dragDiagnosticsEnabled: process.env.CLAWD_WINDOW_DEBUG === "1",
     guardAlwaysOnTop,
     onDidFinishLoad: () => {
       sendToHitWin("theme-config", themeRuntime.getHitRendererConfig());
@@ -4830,7 +4831,7 @@ function createWindow() {
   registerPetInteractionIpc({
     ipcMain,
     showContextMenu: (event) => showPetContextMenu(event),
-    moveWindowForDrag: () => moveWindowForDrag(),
+    moveWindowForDrag: (diagnosticSample) => moveWindowForDrag(diagnosticSample),
     setIdlePaused: (value) => { idlePaused = !!value; },
     setLowPowerIdlePaused,
     setAccessoryMirror: setAccessoryMirrored,
@@ -4857,8 +4858,8 @@ function createWindow() {
     setDragLocked: (value) => { petWindowRuntime.setDragLocked(value); },
     setMouseOverPet: (value) => { mouseOverPet = !!value; },
     cancelRoam: () => _roam.cancelRoam(),
-    beginDragSnapshot: () => beginDragSnapshot(),
-    clearDragSnapshot: () => clearDragSnapshot(),
+    beginDragSnapshot: (diagnosticSample) => beginDragSnapshot(diagnosticSample),
+    clearDragSnapshot: (diagnosticSample) => clearDragSnapshot(diagnosticSample),
     syncHitWin: () => syncHitWin(),
     syncDisplayedVisualGeometry,
     syncImeEditingPetDodge: () => topmostRuntime.syncImeEditingPetDodge(),

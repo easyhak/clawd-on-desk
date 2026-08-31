@@ -52,7 +52,7 @@ function createHarness(overrides = {}) {
   const runtime = registerPetInteractionIpc({
     ipcMain,
     showContextMenu: (event) => calls.push(["showContextMenu", event.sender]),
-    moveWindowForDrag: () => calls.push(["moveWindowForDrag"]),
+    moveWindowForDrag: (...args) => calls.push(["moveWindowForDrag", ...args]),
     setIdlePaused: (value) => calls.push(["setIdlePaused", value]),
     isMiniTransitioning: () => state.miniTransitioning,
     getCurrentState: () => state.currentState,
@@ -65,8 +65,8 @@ function createHarness(overrides = {}) {
     cancelRoam: Object.prototype.hasOwnProperty.call(overrides, "cancelRoam")
       ? overrides.cancelRoam
       : (() => calls.push(["cancelRoam"])),
-    beginDragSnapshot: () => calls.push(["beginDragSnapshot"]),
-    clearDragSnapshot: () => calls.push(["clearDragSnapshot"]),
+    beginDragSnapshot: (...args) => calls.push(["beginDragSnapshot", ...args]),
+    clearDragSnapshot: (...args) => calls.push(["clearDragSnapshot", ...args]),
     syncHitWin: () => calls.push(["syncHitWin"]),
     syncDisplayedVisualGeometry: () => calls.push(["syncDisplayedVisualGeometry"]),
     setAccessoryMirror: overrides.setAccessoryMirror
@@ -283,6 +283,26 @@ test("pet interaction IPC preserves drag lock lifecycle", () => {
     // is in flight — releasing the lock must re-run the sync.
     ["syncImeEditingPetDodge"],
   ]);
+});
+
+test("pet interaction IPC forwards opt-in drag diagnostic samples without changing decisions", () => {
+  const { ipcMain, calls } = createHarness();
+  const start = { sequence: 1, screenX: 100, screenY: 200 };
+  const move = { sequence: 2, screenX: 120, screenY: 210 };
+  const end = { sequence: 3, screenX: 120, screenY: 210 };
+
+  ipcMain.send("drag-lock", true, start);
+  ipcMain.send("drag-move", move);
+  ipcMain.send("drag-lock", false, end);
+
+  assert.deepStrictEqual(
+    calls.filter((call) => ["beginDragSnapshot", "moveWindowForDrag", "clearDragSnapshot"].includes(call[0])),
+    [
+      ["beginDragSnapshot", start],
+      ["moveWindowForDrag", move],
+      ["clearDragSnapshot", end],
+    ]
+  );
 });
 
 test("pet interaction IPC requires the roam cancel dependency", () => {

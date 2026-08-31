@@ -25,6 +25,7 @@ const { resolveHorizontalEdgeContext } = require("./display-edge");
 const { classifyCloakState } = require("./win-cloak-recovery");
 
 const noop = () => {};
+const DRAG_DIAGNOSTIC_INTERVAL_MS = 250;
 const DEFAULT_CRASH_RELOAD_LIMIT = 5;
 const DEFAULT_CRASH_RELOAD_WINDOW_MS = 30_000;
 const NON_RELOADABLE_RENDER_GONE_REASONS = new Set([
@@ -336,6 +337,8 @@ function createPetWindowRuntime(options = {}) {
   let petHidden = false;
   let dragLocked = false;
   let dragSnapshot = null;
+  let dragDiagnostic = null;
+  let dragDiagnosticId = 0;
   let hitShapeWidth = 0;
   let hitShapeHeight = 0;
   let settingsSizePreviewSyncFrozen = false;
@@ -381,6 +384,108 @@ function createPetWindowRuntime(options = {}) {
     return typeof screen.getCursorScreenPoint === "function"
       ? screen.getCursorScreenPoint()
       : null;
+  }
+
+  // #752 diagnostic-only projection. Samples are numeric allowlists so an
+  // unexpected renderer payload can neither expand the log nor affect drag.
+  function sanitizeDiagnosticNumber(value) {
+    if (!Number.isFinite(value) || Math.abs(value) > 1_000_000_000) return null;
+    return Math.round(value * 100) / 100;
+  }
+
+  function sanitizeDiagnosticPoint(point) {
+    if (!point || typeof point !== "object") return null;
+    const x = sanitizeDiagnosticNumber(point.x);
+    const y = sanitizeDiagnosticNumber(point.y);
+    return x === null || y === null ? null : { x, y };
+  }
+
+  function sanitizeDiagnosticRect(rect) {
+    if (!rect || typeof rect !== "object") return null;
+    const x = sanitizeDiagnosticNumber(rect.x);
+    const y = sanitizeDiagnosticNumber(rect.y);
+    const width = sanitizeDiagnosticNumber(rect.width);
+    const height = sanitizeDiagnosticNumber(rect.height);
+    return x === null || y === null || width === null || height === null
+      ? null
+      : { x, y, width, height };
+  }
+
+  function sanitizeDragDiagnosticSample(sample) {
+    if (!sample || typeof sample !== "object" || Array.isArray(sample)) return null;
+    const out = {};
+    for (const key of [
+      "sequence",
+      "clientX",
+      "clientY",
+      "screenX",
+      "screenY",
+      "movementX",
+      "movementY",
+      "movementTotalX",
+      "movementTotalY",
+      "devicePixelRatio",
+    ]) {
+      out[key] = sanitizeDiagnosticNumber(sample[key]);
+    }
+    const hasCoordinates = ["clientX", "clientY", "screenX", "screenY"].some((key) => out[key] !== null);
+    return hasCoordinates ? out : null;
+  }
+
+  function diagnosticDelta(current, initial) {
+    if (!current || !initial) return null;
+    return {
+      x: sanitizeDiagnosticNumber(current.x - initial.x),
+      y: sanitizeDiagnosticNumber(current.y - initial.y),
+    };
+  }
+
+  function diagnosticSamplePoint(sample, xKey, yKey) {
+    if (!sample || sample[xKey] === null || sample[yKey] === null) return null;
+    return { x: sample[xKey], y: sample[yKey] };
+  }
+
+  function getNativeRenderBoundsForDiagnostic() {
+    const renderWin = getRenderWindow();
+    if (!isLiveWindow(renderWin) || typeof renderWin.getBounds !== "function") return null;
+    try {
+      return sanitizeDiagnosticRect(renderWin.getBounds());
+    } catch {
+      return null;
+    }
+  }
+
+  function logDragDiagnostic(phase, sample, electronCursor, targetBounds = null, force = false) {
+    if (!dragDiagnostic) return;
+    const timestamp = now();
+    if (
+      phase === "move"
+      && !force
+      && dragDiagnostic.moveCount > 1
+      && timestamp - dragDiagnostic.lastMoveLogAt < DRAG_DIAGNOSTIC_INTERVAL_MS
+    ) return;
+    if (phase === "move") dragDiagnostic.lastMoveLogAt = timestamp;
+
+    const pointer = sanitizeDragDiagnosticSample(sample) || dragDiagnostic.lastPointer;
+    if (pointer) dragDiagnostic.lastPointer = pointer;
+    const electronPoint = sanitizeDiagnosticPoint(electronCursor);
+    const pointerScreen = diagnosticSamplePoint(pointer, "screenX", "screenY");
+    const pointerClient = diagnosticSamplePoint(pointer, "clientX", "clientY");
+    const payload = {
+      id: dragDiagnostic.id,
+      phase,
+      elapsedMs: Math.max(0, Math.round(timestamp - dragDiagnostic.startedAt)),
+      moveCount: dragDiagnostic.moveCount,
+      pointer,
+      pointerScreenDelta: diagnosticDelta(pointerScreen, dragDiagnostic.startPointerScreen),
+      pointerClientDelta: diagnosticDelta(pointerClient, dragDiagnostic.startPointerClient),
+      electronCursor: electronPoint,
+      electronCursorDelta: diagnosticDelta(electronPoint, dragDiagnostic.startElectronCursor),
+      logicalBounds: sanitizeDiagnosticRect(getPetWindowBounds()),
+      nativeBounds: getNativeRenderBoundsForDiagnostic(),
+      targetBounds: sanitizeDiagnosticRect(targetBounds),
+    };
+    edgeLog(`Clawd: drag-diagnostic ${JSON.stringify(payload)}`);
   }
 
   function getDisplayNearestPoint(cx, cy) {
@@ -2210,6 +2315,7 @@ function createPetWindowRuntime(options = {}) {
         additionalArguments: [
           "--hit-theme-config=" + JSON.stringify(optionsArg.hitThemeConfig),
           "--hit-platform=" + process.platform,
+          ...(optionsArg.dragDiagnosticsEnabled ? ["--hit-drag-diagnostics=1"] : []),
         ],
       },
     });
@@ -2259,46 +2365,87 @@ function createPetWindowRuntime(options = {}) {
     return dragLocked;
   }
 
-  function beginDragSnapshot() {
+  function beginDragSnapshot(diagnosticSample) {
     const win = getRenderWindow();
     if (!isLiveWindow(win)) {
       dragSnapshot = null;
+      dragDiagnostic = null;
       return;
     }
     const bounds = getPetWindowBounds();
     if (!bounds) {
       dragSnapshot = null;
+      dragDiagnostic = null;
       return;
     }
     // #408: use the effective size (frozen, when keepSizeAcrossDisplays is on)
     // so the drag snapshot follows the frozen invariant instead of re-reading
     // live bounds — keeps every size path on one source of truth.
     const size = getEffectiveCurrentPixelSize();
+    const electronCursor = getCursorScreenPoint();
     dragSnapshot = createDragSnapshot(
-      getCursorScreenPoint(),
+      electronCursor,
       bounds,
       size
     );
+    const pointer = sanitizeDragDiagnosticSample(diagnosticSample);
+    if (pointer) {
+      dragDiagnostic = {
+        id: ++dragDiagnosticId,
+        startedAt: now(),
+        lastMoveLogAt: -Infinity,
+        moveCount: 0,
+        lastPointer: pointer,
+        startPointerScreen: diagnosticSamplePoint(pointer, "screenX", "screenY"),
+        startPointerClient: diagnosticSamplePoint(pointer, "clientX", "clientY"),
+        startElectronCursor: sanitizeDiagnosticPoint(electronCursor),
+      };
+      logDragDiagnostic("start", pointer, electronCursor, bounds, true);
+    } else {
+      dragDiagnostic = null;
+    }
   }
 
-  function clearDragSnapshot() {
+  function clearDragSnapshot(diagnosticSample) {
+    if (dragDiagnostic) {
+      logDragDiagnostic("end", diagnosticSample, getCursorScreenPoint(), null, true);
+    }
+    dragDiagnostic = null;
     dragSnapshot = null;
   }
 
-  function moveWindowForDrag() {
+  function moveWindowForDrag(diagnosticSample) {
     if (!dragLocked) return;
     if (getMiniMode() || getMiniTransitioning()) return;
     if (!isLiveWindow(getRenderWindow())) return;
-    if (!dragSnapshot) return;
+    const electronCursor = getCursorScreenPoint();
+    if (!dragSnapshot) {
+      if (dragDiagnostic) {
+        dragDiagnostic.moveCount += 1;
+        const pointer = sanitizeDragDiagnosticSample(diagnosticSample);
+        if (pointer) dragDiagnostic.lastPointer = pointer;
+      }
+      logDragDiagnostic("move", diagnosticSample, electronCursor, null);
+      return;
+    }
 
     const bounds = computeAnchoredDragBounds(
       dragSnapshot,
-      getCursorScreenPoint(),
+      electronCursor,
       looseClampPetToDisplays
     );
-    if (!bounds) return;
+    if (dragDiagnostic) {
+      dragDiagnostic.moveCount += 1;
+      const pointer = sanitizeDragDiagnosticSample(diagnosticSample);
+      if (pointer) dragDiagnostic.lastPointer = pointer;
+    }
+    if (!bounds) {
+      logDragDiagnostic("move", diagnosticSample, electronCursor, null);
+      return;
+    }
 
     applyPetWindowBounds(bounds);
+    logDragDiagnostic("move", diagnosticSample, electronCursor, bounds);
     if (isWin && isNearWorkAreaEdge(bounds)) reassertWinTopmost();
     syncHitWin();
     repositionAnchoredSurfaces();
