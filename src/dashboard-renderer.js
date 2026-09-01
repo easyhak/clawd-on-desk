@@ -815,6 +815,13 @@ async function consumeQuickSelectIntent() {
   }
 }
 
+function quickSelectPhysicalDigitKey(event) {
+  if (!event) return null;
+  const code = typeof event.code === "string" ? event.code : "";
+  if (/^(?:Digit|Numpad)[1-9]$/.test(code)) return code;
+  return /^[1-9]$/.test(event.key) ? `key:${event.key}` : null;
+}
+
 function onQuickSelectKeyDown(event) {
   if (!quickSelectActive || !event) return;
   if (
@@ -827,7 +834,8 @@ function onQuickSelectKeyDown(event) {
   if (/^[1-9]$/.test(event.key)) {
     event.preventDefault();
     event.stopPropagation();
-    quickSelectHeldDigits.add(event.key);
+    const physicalKey = quickSelectPhysicalDigitKey(event);
+    if (physicalKey) quickSelectHeldDigits.add(physicalKey);
     if (quickSelectActivationPending) {
       pauseQuickSelectHandoffTimer();
       return;
@@ -849,10 +857,12 @@ function onQuickSelectKeyDown(event) {
 }
 
 function onQuickSelectKeyUp(event) {
-  if (!quickSelectActive || !event || !/^[1-9]$/.test(event.key)) return;
+  if (!quickSelectActive || !event) return;
+  const physicalKey = quickSelectPhysicalDigitKey(event);
+  if (!physicalKey) return;
   event.preventDefault();
   event.stopPropagation();
-  quickSelectHeldDigits.delete(event.key);
+  quickSelectHeldDigits.delete(physicalKey);
   if (
     quickSelectActivationPending
     && quickSelectHandoffPromise

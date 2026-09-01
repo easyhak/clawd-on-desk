@@ -204,6 +204,7 @@ async function loadDashboard(
   const quickSelectActivationCalls = [];
   const timeoutCallbacks = new Map();
   let nextTimeoutId = 1;
+  let timeoutNowMs = 0;
   let renderInterval = null;
   let snapshotListener = null;
   let quickSelectIntentListener = null;
@@ -270,18 +271,41 @@ async function loadDashboard(
       windowListeners.get(name).push(listener);
     },
   };
-  const scheduleTimeout = (callback) => {
+  const scheduleTimeout = (callback, delayMs = 0) => {
     const timeoutId = nextTimeoutId++;
-    timeoutCallbacks.set(timeoutId, callback);
+    const delay = Number.isFinite(Number(delayMs)) ? Math.max(0, Number(delayMs)) : 0;
+    timeoutCallbacks.set(timeoutId, {
+      callback,
+      dueAt: timeoutNowMs + delay,
+    });
     if (kimiOptions.deferTimeouts !== true) {
       queueMicrotask(() => {
         const pending = timeoutCallbacks.get(timeoutId);
         if (!pending) return;
         timeoutCallbacks.delete(timeoutId);
-        pending();
+        timeoutNowMs = Math.max(timeoutNowMs, pending.dueAt);
+        pending.callback();
       });
     }
     return timeoutId;
+  };
+  const advanceTimersByTime = async (advanceMs) => {
+    const amount = Number(advanceMs);
+    if (!Number.isFinite(amount) || amount < 0) throw new Error("advanceMs must be non-negative");
+    const targetTime = timeoutNowMs + amount;
+    while (true) {
+      const next = [...timeoutCallbacks.entries()]
+        .filter(([, pending]) => pending.dueAt <= targetTime)
+        .sort((a, b) => a[1].dueAt - b[1].dueAt || a[0] - b[0])[0];
+      if (!next) break;
+      const [timeoutId, pending] = next;
+      timeoutCallbacks.delete(timeoutId);
+      timeoutNowMs = pending.dueAt;
+      pending.callback();
+      await Promise.resolve();
+    }
+    timeoutNowMs = targetTime;
+    await flush();
   };
   const context = vm.createContext({
     window: fakeWindow, document, console, Intl, Date,
@@ -321,12 +345,7 @@ async function loadDashboard(
       for (const listener of windowListeners.get("blur") || []) await listener();
     },
     pointerDown: async (target) => document.dispatch("pointerdown", { target }),
-    runTimeouts: async () => {
-      const callbacks = [...timeoutCallbacks.values()];
-      timeoutCallbacks.clear();
-      for (const callback of callbacks) callback();
-      await flush();
-    },
+    advanceTimersByTime,
     tickRender: () => { if (renderInterval) renderInterval(); },
   };
 }
@@ -435,27 +454,109 @@ test("Dashboard Quick Select consumes rapid repeated digits before focus handoff
     { quickSelectIntent: true, deferTimeouts: true }
   );
 
-  const firstDown = await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
-  const firstUp = await dashboard.quickSelectLayer.dispatch("keyup", { key: "1" });
+  const firstDown = await dashboard.quickSelectLayer.dispatch("keydown", {
+    key: "1",
+    code: "Digit1",
+  });
+  const firstUp = await dashboard.quickSelectLayer.dispatch("keyup", {
+    key: "1",
+    code: "Digit1",
+  });
   assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
   assert.strictEqual(dashboard.quickSelectLayer.hidden, false);
 
-  const secondDown = await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  await dashboard.advanceTimersByTime(60);
+  const secondDown = await dashboard.quickSelectLayer.dispatch("keydown", {
+    key: "1",
+    code: "Digit1",
+  });
   const repeatedDown = await dashboard.quickSelectLayer.dispatch("keydown", {
     key: "1",
+    code: "Digit1",
     repeat: true,
   });
-  const secondUp = await dashboard.quickSelectLayer.dispatch("keyup", { key: "1" });
+  await dashboard.advanceTimersByTime(120);
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
+
+  const secondUp = await dashboard.quickSelectLayer.dispatch("keyup", {
+    key: "1",
+    code: "Digit1",
+  });
   for (const event of [firstDown, firstUp, secondDown, repeatedDown, secondUp]) {
     assert.strictEqual(event.prevented, true);
     assert.strictEqual(event.stopped, true);
   }
   assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
 
-  await dashboard.runTimeouts();
+  await dashboard.advanceTimersByTime(119);
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
+  await dashboard.advanceTimersByTime(1);
   assert.strictEqual(dashboard.quickSelectActivationCalls.length, 1);
   assert.strictEqual(dashboard.quickSelectActivationCalls[0].sessionId, "a");
   assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
+});
+
+test("Dashboard Quick Select tracks a digit release when Shift changes event.key", async () => {
+  const dashboard = await loadDashboard(
+    [session("a", { canFocus: true, displayTitle: "Alpha", agentId: "codex" })],
+    { status: "ok" },
+    {},
+    { status: "applied" },
+    { quickSelectIntent: true, deferTimeouts: true }
+  );
+
+  await dashboard.quickSelectLayer.dispatch("keydown", {
+    key: "1",
+    code: "Digit1",
+  });
+  const shiftedUp = await dashboard.quickSelectLayer.dispatch("keyup", {
+    key: "!",
+    code: "Digit1",
+    shiftKey: true,
+  });
+  assert.strictEqual(shiftedUp.prevented, true);
+  assert.strictEqual(shiftedUp.stopped, true);
+
+  await dashboard.advanceTimersByTime(119);
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
+  await dashboard.advanceTimersByTime(1);
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 1);
+  assert.strictEqual(dashboard.quickSelectActivationCalls[0].sessionId, "a");
+});
+
+test("Dashboard Quick Select waits for distinct top-row and numpad digit releases", async () => {
+  const dashboard = await loadDashboard(
+    [session("a", { canFocus: true, displayTitle: "Alpha", agentId: "codex" })],
+    { status: "ok" },
+    {},
+    { status: "applied" },
+    { quickSelectIntent: true, deferTimeouts: true }
+  );
+
+  await dashboard.quickSelectLayer.dispatch("keydown", {
+    key: "1",
+    code: "Digit1",
+  });
+  await dashboard.quickSelectLayer.dispatch("keydown", {
+    key: "1",
+    code: "Numpad1",
+  });
+  await dashboard.quickSelectLayer.dispatch("keyup", {
+    key: "1",
+    code: "Digit1",
+  });
+  await dashboard.advanceTimersByTime(500);
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
+
+  await dashboard.quickSelectLayer.dispatch("keyup", {
+    key: "1",
+    code: "Numpad1",
+  });
+  await dashboard.advanceTimersByTime(119);
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
+  await dashboard.advanceTimersByTime(1);
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 1);
+  assert.strictEqual(dashboard.quickSelectActivationCalls[0].sessionId, "a");
 });
 
 test("Dashboard Quick Select cancels a pending digit handoff when it exits", async () => {
@@ -467,9 +568,9 @@ test("Dashboard Quick Select cancels a pending digit handoff when it exits", asy
     { quickSelectIntent: true, deferTimeouts: true }
   );
 
-  await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  await dashboard.quickSelectLayer.dispatch("keydown", { key: "1", code: "Digit1" });
   await dashboard.quickSelectLayer.dispatch("keydown", { key: "Escape" });
-  await dashboard.runTimeouts();
+  await dashboard.advanceTimersByTime(1000);
 
   assert.deepStrictEqual(dashboard.quickSelectActivationCalls, []);
   assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
