@@ -201,6 +201,7 @@ function createPetWindowRuntime(options = {}) {
     options.notifyMiniTopologyChangedDuringTransition || noop;
   const exitMiniMode = options.exitMiniMode || noop;
   const shouldReloadAfterRenderProcessGone = createRenderProcessGoneReloadGuard(options);
+  const shownHitWindows = new WeakSet();
 
   function reloadRuntimeWindowWebContents(win, reloadOptions = {}) {
     if (
@@ -2193,8 +2194,16 @@ function createPetWindowRuntime(options = {}) {
       webPreferences: {
         preload: optionsArg.preloadPath,
         backgroundThrottling: false,
+        // Sandboxed Electron preloads cannot require the experiment's local
+        // helper module. Relax the sandbox only for the exact, opt-in render
+        // role; every normal window keeps Electron's default sandbox.
+        ...(Array.isArray(optionsArg.additionalArguments)
+          && optionsArg.additionalArguments.includes("--niri-inspect-role=render")
+          ? { sandbox: false }
+          : {}),
         additionalArguments: [
           "--theme-config=" + JSON.stringify(optionsArg.themeConfig),
+          ...(Array.isArray(optionsArg.additionalArguments) ? optionsArg.additionalArguments : []),
         ],
       },
     });
@@ -2288,6 +2297,7 @@ function createPetWindowRuntime(options = {}) {
       hasShadow: false,
       fullscreenable: false,
       enableLargerThanScreen: true,
+      ...(optionsArg.deferShow === true ? { show: false } : {}),
       ...(isLinux ? { type: linuxWindowType } : {}),
       ...(isMac ? { type: "panel", roundedCorners: false } : {}),
       // KEY EXPERIMENT: allow activation to avoid WS_EX_NOACTIVATE input
@@ -2296,9 +2306,16 @@ function createPetWindowRuntime(options = {}) {
       webPreferences: {
         preload: optionsArg.preloadPath,
         backgroundThrottling: false,
+        // See createRenderWindow(): keep the exception role-specific so an
+        // unrelated additional argument can never disable the sandbox.
+        ...(Array.isArray(optionsArg.additionalArguments)
+          && optionsArg.additionalArguments.includes("--niri-inspect-role=hit")
+          ? { sandbox: false }
+          : {}),
         additionalArguments: [
           "--hit-theme-config=" + JSON.stringify(optionsArg.hitThemeConfig),
           "--hit-platform=" + process.platform,
+          ...(Array.isArray(optionsArg.additionalArguments) ? optionsArg.additionalArguments : []),
         ],
       },
     });
@@ -2311,10 +2328,7 @@ function createPetWindowRuntime(options = {}) {
     // window until createHitWindow() returns and the caller assigns it.
     applyHitInputState(hitWin);
     if (isMac) hitWin.setFocusable(false);
-    hitWin.showInactive();
-    keepOutOfTaskbar(hitWin);
-    if (isWin) hitWin.setAlwaysOnTop(true, topmostLevel);
-    reapplyMacVisibility();
+    if (optionsArg.deferShow !== true) showHitWindow(hitWin);
     hitWin.loadFile(optionsArg.loadFilePath);
     if (isWin && typeof optionsArg.guardAlwaysOnTop === "function") {
       optionsArg.guardAlwaysOnTop(hitWin);
@@ -2330,6 +2344,17 @@ function createPetWindowRuntime(options = {}) {
       reloadRuntimeWindowWebContents(hitWin, { crashKey: "hitWin", details });
     });
     return hitWin;
+  }
+
+  function showHitWindow(hitWinOverride = getHitWindow()) {
+    if (!isLiveWindow(hitWinOverride)) return false;
+    if (shownHitWindows.has(hitWinOverride)) return true;
+    hitWinOverride.showInactive();
+    keepOutOfTaskbar(hitWinOverride);
+    if (isWin) hitWinOverride.setAlwaysOnTop(true, topmostLevel);
+    reapplyMacVisibility();
+    shownHitWindows.add(hitWinOverride);
+    return true;
   }
 
   // §4.3.10's drag protection-period release point. The plan names two call
@@ -2664,6 +2689,7 @@ function createPetWindowRuntime(options = {}) {
     getInitialHitWindowBounds,
     createRenderWindow,
     createHitWindow,
+    showHitWindow,
     reloadWindowWebContents: reloadRuntimeWindowWebContents,
     setDragLocked,
     isDragLocked,
