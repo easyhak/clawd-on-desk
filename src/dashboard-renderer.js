@@ -29,8 +29,13 @@ let quickSelectFeedbackKey = "";
 let quickSelectDigitMap = new Map();
 let quickSelectFallbackTitles = new Map();
 let quickSelectGeneration = 0;
+let quickSelectHeldDigits = new Set();
+let quickSelectHandoffTimer = null;
+let quickSelectHandoffPromise = null;
+let quickSelectHandoffResolve = null;
 
 const SESSION_FOLDER_FEEDBACK_MS = 4000;
+const QUICK_SELECT_HANDOFF_QUIET_MS = 120;
 const sessionFolderActionState = new Map();
 const sessionAutomationActionState = new Map();
 
@@ -679,9 +684,49 @@ function renderQuickSelectLayer() {
   quickSelectOptionsEl.replaceChildren(fragment);
 }
 
+function pauseQuickSelectHandoffTimer() {
+  if (quickSelectHandoffTimer !== null && typeof clearTimeout === "function") {
+    clearTimeout(quickSelectHandoffTimer);
+  }
+  quickSelectHandoffTimer = null;
+}
+
+function finishQuickSelectHandoff(ready) {
+  pauseQuickSelectHandoffTimer();
+  const resolve = quickSelectHandoffResolve;
+  quickSelectHandoffPromise = null;
+  quickSelectHandoffResolve = null;
+  if (typeof resolve === "function") resolve(ready === true);
+}
+
+function armQuickSelectHandoffTimer() {
+  if (!quickSelectHandoffPromise || quickSelectHeldDigits.size > 0) return;
+  pauseQuickSelectHandoffTimer();
+  quickSelectHandoffTimer = setTimeout(() => {
+    quickSelectHandoffTimer = null;
+    finishQuickSelectHandoff(true);
+  }, QUICK_SELECT_HANDOFF_QUIET_MS);
+}
+
+function waitForQuickSelectHandoff() {
+  if (!quickSelectHandoffPromise) {
+    quickSelectHandoffPromise = new Promise((resolve) => {
+      quickSelectHandoffResolve = resolve;
+    });
+  }
+  armQuickSelectHandoffTimer();
+  return quickSelectHandoffPromise;
+}
+
+function resetQuickSelectHandoff() {
+  finishQuickSelectHandoff(false);
+  quickSelectHeldDigits = new Set();
+}
+
 function exitQuickSelect() {
   if (!quickSelectActive) return;
   quickSelectGeneration += 1;
+  resetQuickSelectHandoff();
   quickSelectActive = false;
   quickSelectActivationPending = false;
   quickSelectFeedbackKey = "";
@@ -692,6 +737,7 @@ function exitQuickSelect() {
 
 function enterQuickSelect() {
   quickSelectGeneration += 1;
+  resetQuickSelectHandoff();
   const candidates = orderedQuickSelectCandidates(snapshot);
   quickSelectDigitMap = new Map();
   quickSelectFallbackTitles = new Map();
@@ -732,6 +778,12 @@ async function activateQuickSelectDigit(digit) {
   quickSelectActivationPending = true;
   const activationGeneration = quickSelectGeneration;
   quickSelectFeedbackKey = "";
+  const handoffReady = await waitForQuickSelectHandoff();
+  if (
+    !handoffReady
+    || activationGeneration !== quickSelectGeneration
+    || !quickSelectActive
+  ) return;
   let result;
   try {
     result = await window.dashboardAPI.activateQuickSelectSession({ sessionId });
@@ -767,7 +819,6 @@ function onQuickSelectKeyDown(event) {
   if (!quickSelectActive || !event) return;
   if (
     event.isComposing
-    || event.repeat
     || event.metaKey
     || event.ctrlKey
     || event.altKey
@@ -776,6 +827,12 @@ function onQuickSelectKeyDown(event) {
   if (/^[1-9]$/.test(event.key)) {
     event.preventDefault();
     event.stopPropagation();
+    quickSelectHeldDigits.add(event.key);
+    if (quickSelectActivationPending) {
+      pauseQuickSelectHandoffTimer();
+      return;
+    }
+    if (event.repeat) return;
     void activateQuickSelectDigit(Number(event.key));
     return;
   }
@@ -788,6 +845,20 @@ function onQuickSelectKeyDown(event) {
   if (event.key === "Tab") {
     if (typeof setTimeout === "function") setTimeout(exitQuickSelect, 0);
     else Promise.resolve().then(exitQuickSelect);
+  }
+}
+
+function onQuickSelectKeyUp(event) {
+  if (!quickSelectActive || !event || !/^[1-9]$/.test(event.key)) return;
+  event.preventDefault();
+  event.stopPropagation();
+  quickSelectHeldDigits.delete(event.key);
+  if (
+    quickSelectActivationPending
+    && quickSelectHandoffPromise
+    && quickSelectHeldDigits.size === 0
+  ) {
+    armQuickSelectHandoffTimer();
   }
 }
 
@@ -1445,6 +1516,7 @@ function render(options = {}) {
 async function init() {
   if (quickSelectLayerEl && typeof quickSelectLayerEl.addEventListener === "function") {
     quickSelectLayerEl.addEventListener("keydown", onQuickSelectKeyDown);
+    quickSelectLayerEl.addEventListener("keyup", onQuickSelectKeyUp);
   }
   if (typeof document.addEventListener === "function") {
     document.addEventListener("pointerdown", (event) => {

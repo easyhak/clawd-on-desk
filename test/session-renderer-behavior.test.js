@@ -202,6 +202,8 @@ async function loadDashboard(
   const automationCalls = [];
   const kimiRefreshCalls = [];
   const quickSelectActivationCalls = [];
+  const timeoutCallbacks = new Map();
+  let nextTimeoutId = 1;
   let renderInterval = null;
   let snapshotListener = null;
   let quickSelectIntentListener = null;
@@ -268,10 +270,24 @@ async function loadDashboard(
       windowListeners.get(name).push(listener);
     },
   };
+  const scheduleTimeout = (callback) => {
+    const timeoutId = nextTimeoutId++;
+    timeoutCallbacks.set(timeoutId, callback);
+    if (kimiOptions.deferTimeouts !== true) {
+      queueMicrotask(() => {
+        const pending = timeoutCallbacks.get(timeoutId);
+        if (!pending) return;
+        timeoutCallbacks.delete(timeoutId);
+        pending();
+      });
+    }
+    return timeoutId;
+  };
   const context = vm.createContext({
     window: fakeWindow, document, console, Intl, Date,
     setInterval: (callback) => { renderInterval = callback; return 1; },
-    setTimeout: (callback) => { callback(); return 1; },
+    setTimeout: scheduleTimeout,
+    clearTimeout: (timeoutId) => timeoutCallbacks.delete(timeoutId),
     requestAnimationFrame: (cb) => cb(),
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "..", "src", "session-focus-unavailable.js"), "utf8"), context);
@@ -305,6 +321,12 @@ async function loadDashboard(
       for (const listener of windowListeners.get("blur") || []) await listener();
     },
     pointerDown: async (target) => document.dispatch("pointerdown", { target }),
+    runTimeouts: async () => {
+      const callbacks = [...timeoutCallbacks.values()];
+      timeoutCallbacks.clear();
+      for (const callback of callbacks) callback();
+      await flush();
+    },
     tickRender: () => { if (renderInterval) renderInterval(); },
   };
 }
@@ -393,10 +415,63 @@ test("Dashboard Quick Select keeps digit mapping stable while the live order cha
     session("a", { canFocus: true, displayTitle: "Alpha", agentId: "codex" }),
   ]);
   await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  await dashboard.quickSelectLayer.dispatch("keyup", { key: "1" });
   await flush();
 
   assert.strictEqual(dashboard.quickSelectActivationCalls.length, 1);
   assert.strictEqual(dashboard.quickSelectActivationCalls[0].sessionId, "a");
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
+});
+
+test("Dashboard Quick Select consumes rapid repeated digits before focus handoff", async () => {
+  const dashboard = await loadDashboard(
+    [
+      session("a", { canFocus: true, displayTitle: "Alpha", agentId: "codex" }),
+      session("b", { canFocus: true, displayTitle: "Beta", agentId: "claude-code" }),
+    ],
+    { status: "ok" },
+    {},
+    { status: "applied" },
+    { quickSelectIntent: true, deferTimeouts: true }
+  );
+
+  const firstDown = await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  const firstUp = await dashboard.quickSelectLayer.dispatch("keyup", { key: "1" });
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, false);
+
+  const secondDown = await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  const repeatedDown = await dashboard.quickSelectLayer.dispatch("keydown", {
+    key: "1",
+    repeat: true,
+  });
+  const secondUp = await dashboard.quickSelectLayer.dispatch("keyup", { key: "1" });
+  for (const event of [firstDown, firstUp, secondDown, repeatedDown, secondUp]) {
+    assert.strictEqual(event.prevented, true);
+    assert.strictEqual(event.stopped, true);
+  }
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 0);
+
+  await dashboard.runTimeouts();
+  assert.strictEqual(dashboard.quickSelectActivationCalls.length, 1);
+  assert.strictEqual(dashboard.quickSelectActivationCalls[0].sessionId, "a");
+  assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
+});
+
+test("Dashboard Quick Select cancels a pending digit handoff when it exits", async () => {
+  const dashboard = await loadDashboard(
+    [session("a", { canFocus: true, displayTitle: "Alpha", agentId: "codex" })],
+    { status: "ok" },
+    {},
+    { status: "applied" },
+    { quickSelectIntent: true, deferTimeouts: true }
+  );
+
+  await dashboard.quickSelectLayer.dispatch("keydown", { key: "1" });
+  await dashboard.quickSelectLayer.dispatch("keydown", { key: "Escape" });
+  await dashboard.runTimeouts();
+
+  assert.deepStrictEqual(dashboard.quickSelectActivationCalls, []);
   assert.strictEqual(dashboard.quickSelectLayer.hidden, true);
 });
 
