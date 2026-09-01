@@ -479,6 +479,7 @@
     validationElement.id = createSettingsDomId("field-validation");
     validationElement.className = "settings-form-field-validation";
     validationElement.hidden = true;
+    document.body.appendChild(validationElement);
 
     let disposed = false;
     const listeners = [];
@@ -550,6 +551,7 @@
         disposed = true;
         for (const [typeName, listener] of listeners) element.removeEventListener(typeName, listener);
         listeners.length = 0;
+        validationElement.remove();
         state.mountedControls.formFields.delete(control);
       },
     };

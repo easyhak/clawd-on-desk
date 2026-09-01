@@ -2720,6 +2720,17 @@ html, body {
 .settings-text-input.pending:not(:disabled) {
   cursor: progress;
 }
+.settings-form-field-validation {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .soft-btn.danger {
   color: var(--toast-error);
   border-color: color-mix(in srgb, var(--toast-error) 35%, var(--border));

@@ -9352,6 +9352,8 @@ describe("settings renderer browser environment", () => {
     assert.equal(field.validationElement.textContent, "Host is required");
     assert.equal(field.validationElement.hidden, false);
     assert.equal(field.element.getAttribute("aria-describedby"), `field-help ${field.validationElement.id}`);
+    assert.equal(document.body.contains(field.validationElement), true,
+      "validation messages must be mounted so aria-describedby resolves");
 
     field.element.value = "new draft";
     field.setState({ invalid: false });
@@ -9363,6 +9365,8 @@ describe("settings renderer browser environment", () => {
       "clearing validation keeps the row description relationship");
 
     field.dispose();
+    assert.equal(document.body.contains(field.validationElement), false,
+      "disposed fields remove their validation node");
     field.element.value = "ignored";
     field.element.dispatchEvent({ type: "input" });
     assert.deepStrictEqual(calls, ["new draft"], "disposed fields remove their callbacks");
