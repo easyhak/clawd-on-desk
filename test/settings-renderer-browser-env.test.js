@@ -766,9 +766,10 @@ function loadSharedLanguagePickerForTest({
     documentElement: { clientHeight: innerHeight, clientWidth: innerWidth },
     createElement(tagName) {
       const element = new FakeElement(tagName);
-      element.focus = () => {
+      element.focus = (options = {}) => {
         element.focused = true;
         document.activeElement = element;
+        if (options.preventScroll !== true) boundary.scrollTop = 0;
       };
       return element;
     },
@@ -9665,9 +9666,23 @@ describe("settings renderer browser environment", () => {
     harness.dispatchWindowEvent("resize");
     harness.flushAnimationFrames();
     assert.notStrictEqual(harness.menu.style.top, originalTop);
+    harness.boundary.scrollTop = 180;
+    assert.strictEqual(harness.getActiveElement(), harness.optionElements[0]);
     harness.boundary.dispatchEvent({ type: "scroll", bubbles: false });
     assert.strictEqual(harness.picker.classList.contains("open"), false);
+    assert.strictEqual(harness.getActiveElement(), harness.trigger,
+      "scroll-close restores focus when an option owned focus");
+    assert.strictEqual(harness.boundary.scrollTop, 180,
+      "focus restoration must not change the user's scroll position");
     assert.strictEqual((harness.boundary.eventListeners.scroll || []).length, 0);
+
+    harness.trigger.dispatchEvent({ type: "click" });
+    const externalControl = new FakeElement("button");
+    harness.body.appendChild(externalControl);
+    harness.setActiveElement(externalControl);
+    harness.boundary.dispatchEvent({ type: "scroll", bubbles: false });
+    assert.strictEqual(harness.getActiveElement(), externalControl,
+      "scroll-close does not steal focus from another control");
   });
 
   it("reveals selected and keyboard-focused options in a scrollable picker", () => {

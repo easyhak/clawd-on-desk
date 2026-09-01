@@ -593,7 +593,12 @@
       setOpen(false, { focusTrigger: true });
     };
     function closeOnBoundaryScroll() {
-      if (isOpen) setOpen(false);
+      if (!isOpen) return;
+      const active = document.activeElement;
+      const shouldRestoreFocus = active
+        && typeof menu.contains === "function"
+        && menu.contains(active);
+      setOpen(false, { focusTrigger: shouldRestoreFocus });
     }
     if (document && typeof document.addEventListener === "function") {
       document.addEventListener("click", closeOnOutsideClick);
