@@ -651,13 +651,18 @@
       },
     });
     const input = control.element;
-    setTextInputState(input, {
+    const textState = {
       disabled: config.disabled,
       pending: config.pending,
       invalid: config.invalid,
       lockWhilePending: config.lockWhilePending,
-      describedBy: config.describedBy,
-    });
+    };
+    if (Object.prototype.hasOwnProperty.call(config, "ariaDescribedBy")) {
+      textState.describedBy = config.ariaDescribedBy;
+    } else if (Object.prototype.hasOwnProperty.call(config, "describedBy")) {
+      textState.describedBy = config.describedBy;
+    }
+    setTextInputState(input, textState);
     return input;
   }
 

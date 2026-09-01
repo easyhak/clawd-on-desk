@@ -9288,6 +9288,20 @@ describe("settings renderer browser environment", () => {
     const passiveEnter = { type: "keydown", key: "Enter" };
     passive.dispatchEvent(passiveEnter);
     assert.notEqual(passiveEnter.defaultPrevented, true, "Enter remains untouched without an onEnter callback");
+
+    const canonical = core.helpers.buildTextInput({
+      ariaLabel: "Canonical description",
+      ariaDescribedBy: "canonical-help",
+    });
+    assert.equal(canonical.getAttribute("aria-describedby"), "canonical-help");
+    const compatibility = core.helpers.buildTextInput({
+      ariaLabel: "Compatibility description",
+      describedBy: "compatibility-help",
+    });
+    assert.equal(compatibility.getAttribute("aria-describedby"), "compatibility-help");
+    core.helpers.setTextInputState(compatibility, { describedBy: "" });
+    assert.equal(compatibility.getAttribute("aria-describedby"), null,
+      "an explicit empty compatibility value clears the relationship");
   });
 
   it("builds Setting rows with stable label and description relationships", () => {
