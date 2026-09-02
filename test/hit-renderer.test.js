@@ -7,7 +7,9 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const HIT_RENDERER = path.join(__dirname, "..", "src", "hit-renderer.js");
+const SHARED_CONTROLLER = path.join(__dirname, "..", "src", "pet-input-controller.js");
 const SOURCE = fs.readFileSync(HIT_RENDERER, "utf8").replace(/\r\n/g, "\n");
+const SHARED_SOURCE = fs.readFileSync(SHARED_CONTROLLER, "utf8").replace(/\r\n/g, "\n");
 
 class FakeArea {
   constructor() {
@@ -18,6 +20,7 @@ class FakeArea {
       remove: (c) => this.classList._set.delete(c),
     };
     this.offsetWidth = 200;
+    this.offsetHeight = 200;
     this.listeners = new Map();
   }
   addEventListener(event, cb) { this.listeners.set(event, cb); }
@@ -88,7 +91,9 @@ function createHarness({ isMac = false, sendState = {} } = {}) {
   };
   context.globalThis = context;
 
-  vm.runInNewContext(SOURCE, context);
+  vm.createContext(context);
+  vm.runInContext(SHARED_SOURCE, context);
+  vm.runInContext(SOURCE, context);
 
   // Apply initial state if provided
   if (apiHandlers.stateSync && Object.keys(sendState).length) {

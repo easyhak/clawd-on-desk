@@ -51,6 +51,8 @@ function createHarness(overrides = {}) {
   const ipcMain = new FakeIpcMain();
   const runtime = registerPetInteractionIpc({
     ipcMain,
+    ...(overrides.isTrustedInputEvent ? { isTrustedInputEvent: overrides.isTrustedInputEvent } : {}),
+    ...(overrides.niriInput ? { niriInput: overrides.niriInput } : {}),
     showContextMenu: (event) => calls.push(["showContextMenu", event.sender]),
     moveWindowForDrag: () => calls.push(["moveWindowForDrag"]),
     setIdlePaused: (value) => calls.push(["setIdlePaused", value]),
@@ -155,6 +157,7 @@ test("pet interaction IPC registers owned channels and disposes them", () => {
     "pause-cursor-polling",
     "pet-drop-paths",
     "pet-interaction:reveal-session-hud",
+    "pet-interaction:show-dashboard",
     "pet-visual-ready",
     "pet-visual-settled",
     "play-click-reaction",
@@ -220,6 +223,16 @@ test("pet interaction IPC delegates pet-interaction:reveal-session-hud to reveal
   ]);
 });
 
+test("pet interaction IPC gates the pet dashboard shortcut through the current input owner", () => {
+  const allowed = createHarness();
+  allowed.ipcMain.send("pet-interaction:show-dashboard");
+  assert.deepStrictEqual(allowed.calls, [["showDashboard"]]);
+
+  const blocked = createHarness({ isTrustedInputEvent: () => false });
+  blocked.ipcMain.send("pet-interaction:show-dashboard");
+  assert.deepStrictEqual(blocked.calls, []);
+});
+
 test("pet interaction IPC delegates menu, drag move, reaction pause, and renderer relays", () => {
   const { ipcMain, calls, state } = createHarness();
 
@@ -283,6 +296,45 @@ test("pet interaction IPC preserves drag lock lifecycle", () => {
     // is in flight — releasing the lock must re-run the sync.
     ["syncImeEditingPetDodge"],
   ]);
+});
+
+test("pet interaction IPC routes audited render drag payloads to niri without legacy bounds writes", () => {
+  const niriCalls = [];
+  const { ipcMain, calls } = createHarness({
+    niriInput: {
+      accepts: () => true,
+      begin: (payload) => { niriCalls.push(["begin", payload]); return true; },
+      move: (payload) => niriCalls.push(["move", payload]),
+      end: () => { niriCalls.push(["end"]); return Promise.resolve(); },
+    },
+  });
+  const lock = { locked: true, grabX: 10, grabY: 20, innerWidth: 200, innerHeight: 100 };
+  ipcMain.send("drag-lock", lock);
+  ipcMain.send("drag-move", { clientX: 30, clientY: 40 });
+  ipcMain.send("drag-lock", { locked: false });
+  ipcMain.send("drag-end");
+
+  assert.deepStrictEqual(niriCalls, [
+    ["begin", lock],
+    ["move", { clientX: 30, clientY: 40 }],
+    ["end"],
+  ]);
+  assert.equal(calls.some((call) => call[0] === "moveWindowForDrag"), false);
+  assert.equal(calls.some((call) => call[0] === "computeDragEndBounds"), false);
+  assert.equal(calls.some((call) => call[0] === "applyPetWindowBounds"), false);
+});
+
+test("pet interaction IPC rejects every input action from a non-owner sender", async () => {
+  const { ipcMain, calls } = createHarness({ isTrustedInputEvent: () => false });
+  ipcMain.send("show-context-menu");
+  ipcMain.send("drag-lock", true);
+  ipcMain.send("drag-move");
+  ipcMain.send("drag-end");
+  ipcMain.send("start-drag-reaction", "left");
+  ipcMain.send("pet-interaction:reveal-session-hud");
+  ipcMain.send("pet-interaction:show-dashboard");
+  await sendDrop(ipcMain, ["/tmp/blocked"], makeDropSender());
+  assert.deepStrictEqual(calls, []);
 });
 
 test("pet interaction IPC requires the roam cancel dependency", () => {

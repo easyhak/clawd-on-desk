@@ -34,6 +34,7 @@ function makeWindow(bounds = { x: 10, y: 20, width: 100, height: 100 }) {
     setIgnoreMouseEvents: (value) => calls.push(["setIgnoreMouseEvents", value]),
     setAlwaysOnTop: (...args) => calls.push(["setAlwaysOnTop", ...args]),
     setFocusable: (value) => calls.push(["setFocusable", value]),
+    setTitle: (value) => calls.push(["setTitle", value]),
     showInactive: () => calls.push(["showInactive"]),
     hide: () => calls.push(["hide"]),
     loadFile: (file) => calls.push(["loadFile", file]),
@@ -188,6 +189,12 @@ function createRuntime(overrides = {}) {
     ...(overrides.noteManualPetShow ? { noteManualPetShow: overrides.noteManualPetShow } : {}),
     ...(overrides.isMiniAnimating ? { isMiniAnimating: overrides.isMiniAnimating } : {}),
     ...(overrides.isRoamAnimating ? { isRoamAnimating: overrides.isRoamAnimating } : {}),
+    ...(overrides.isExternalInputOwnerActive
+      ? { isExternalInputOwnerActive: overrides.isExternalInputOwnerActive }
+      : {}),
+    ...(overrides.isMappedRenderVisibilityLocked
+      ? { isMappedRenderVisibilityLocked: overrides.isMappedRenderVisibilityLocked }
+      : {}),
     ...(overrides.isEdgeVirtualizationDisabled
       ? { isEdgeVirtualizationDisabled: overrides.isEdgeVirtualizationDisabled }
       : {}),
@@ -2934,6 +2941,30 @@ describe("pet-window-runtime", () => {
     assert.equal(harness.runtime.getViewportOffsetY(), 25);
   });
 
+  it("pins the audited niri nonce title across page title updates", () => {
+    const instances = [];
+    const harness = createRuntime({ isWin: false, isLinux: true });
+    harness.runtime.createRenderWindow({
+      BrowserWindow: makeBrowserWindow(instances),
+      size: { width: 120, height: 120 },
+      initialWindowBounds: { x: 40, y: 0, width: 120, height: 120 },
+      initialVirtualBounds: { x: 40, y: 0, width: 120, height: 120 },
+      preloadPath: "preload.js",
+      loadFilePath: "index.html",
+      themeConfig: {},
+      title: "Clawd niri exact-nonce",
+      setRenderWindow: harness.setRenderWin,
+      isQuitting: () => false,
+    });
+    assert.equal(instances[0].options.title, "Clawd niri exact-nonce");
+    assert.deepStrictEqual(instances[0].calls.find((call) => call[0] === "setTitle"), [
+      "setTitle", "Clawd niri exact-nonce",
+    ]);
+    let prevented = false;
+    instances[0].emit("page-title-updated", { preventDefault: () => { prevented = true; } });
+    assert.equal(prevented, true);
+  });
+
   it("flushes runtime prefs once during Windows session end", () => {
     const instances = [];
     const harness = createRuntime();
@@ -3022,6 +3053,40 @@ describe("pet-window-runtime", () => {
     assert.deepStrictEqual(harness.hitWin.calls.filter((call) => call[0] === "setShape"), [
       ["setShape", [{ x: 0, y: 0, width: 120, height: 95 }]],
     ]);
+  });
+
+  it("defers hidden hit geometry and keeps its native input suppressed under an external owner", () => {
+    let externalActive = true;
+    const harness = createRuntime({
+      isWin: false,
+      isLinux: true,
+      isExternalInputOwnerActive: () => externalActive,
+    });
+    harness.runtime.setSingleWindowInputSuppressed(true);
+    assert.deepStrictEqual(harness.hitWin.calls.filter((call) => call[0] === "setIgnoreMouseEvents"), [
+      ["setIgnoreMouseEvents", true],
+    ]);
+    assert.deepStrictEqual(harness.runtime.syncHitWin(), { applied: false, deferred: true });
+    assert.equal(harness.hitWin.calls.some((call) => call[0] === "setBounds"), false);
+    externalActive = false;
+    harness.runtime.setSingleWindowInputSuppressed(false);
+    assert.deepStrictEqual(harness.hitWin.calls.filter((call) => call[0] === "setIgnoreMouseEvents"), [
+      ["setIgnoreMouseEvents", true],
+      ["setIgnoreMouseEvents", false],
+    ]);
+  });
+
+  it("blocks every render unmap while the niri Stage 0 mapping is protected", () => {
+    const harness = createRuntime({
+      isMappedRenderVisibilityLocked: () => true,
+    });
+    const manual = harness.runtime.setPetHidden(true);
+    const fullscreen = harness.runtime.setFullscreenAutoHidden(true);
+    assert.deepStrictEqual(manual, { applied: false, deferred: false, changed: false, blocked: true });
+    assert.deepStrictEqual(fullscreen, { applied: false, deferred: false, changed: false, blocked: true });
+    assert.equal(harness.runtime.isPetEffectivelyHidden(), false);
+    assert.equal(harness.renderWin.calls.some((call) => call[0] === "hide"), false);
+    assert.equal(harness.hitWin.calls.some((call) => call[0] === "hide"), false);
   });
 
   it("does not move the hit window while drag owns pointer capture", () => {

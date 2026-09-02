@@ -244,6 +244,14 @@ module.exports = function initMenu(ctx) {
   function buildTrayMenu() {
     if (!ctx.tray) return;
 
+    const niriFailure = typeof ctx.getNiriSingleWindowFailure === "function"
+      ? ctx.getNiriSingleWindowFailure()
+      : null;
+    const niriFailureGroup = niriFailure ? [{
+      label: `niri input disabled (${niriFailure.phase || "runtime"}) — restart required`,
+      enabled: false,
+    }] : [];
+
     // Same grouping discipline as the context menu (see joinGroups), adapted
     // for the tray's larger item set: state / noise / work / system / app /
     // quit. Other settings (language, theme, bubble follow, start-with-Claude,
@@ -347,7 +355,15 @@ module.exports = function initMenu(ctx) {
       { label: t("quit"), click: () => requestAppQuit() },
     ];
 
-    const items = joinGroups([stateGroup, noiseGroup, workGroup, systemGroup, appGroup, quitGroup]);
+    const items = joinGroups([
+      niriFailureGroup,
+      stateGroup,
+      noiseGroup,
+      workGroup,
+      systemGroup,
+      appGroup,
+      quitGroup,
+    ]);
     ctx.tray.setContextMenu(Menu.buildFromTemplate(items));
   }
 

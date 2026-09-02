@@ -14,6 +14,18 @@ html, body {
   background: transparent;
 }
 
+#pet-input-layer {
+  position: absolute;
+  z-index: 2147483647;
+  display: block;
+  pointer-events: none;
+  cursor: grab;
+}
+
+#pet-input-layer.dragging {
+  cursor: grabbing;
+}
+
 /* Seam clip layer — wraps #pet-container so the multi-monitor seam
    clip-path is applied in screen space. #pet-facing-stage carries the
    left-edge mini-mode flip; this outer layer remains untransformed so

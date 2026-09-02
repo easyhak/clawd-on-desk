@@ -192,6 +192,9 @@ function createPetWindowRuntime(options = {}) {
   // are otherwise treated as fixed per-process facts but env vars are not.
   const isEdgeVirtualizationDisabled = options.isEdgeVirtualizationDisabled
     || (() => process.env.CLAWD_DISABLE_EDGE_VIRTUALIZATION === "1");
+  const isExternalInputOwnerActive = options.isExternalInputOwnerActive || (() => false);
+  const isMappedRenderVisibilityLocked = options.isMappedRenderVisibilityLocked
+    || isExternalInputOwnerActive;
   const flushRuntimeStateToPrefs = options.flushRuntimeStateToPrefs || noop;
   const handleMiniDisplayChange = options.handleMiniDisplayChange || noop;
   // Issue #690 plan §4.5 point 4.5-4: handleDisplayMetricsChanged() must hand
@@ -337,6 +340,7 @@ function createPetWindowRuntime(options = {}) {
   let hitGeometrySuppressed = false;
   let settingsSizePreviewIgnoringHit = false;
   let imeEditingPetDodge = false;
+  let singleWindowInputSuppressed = false;
   let hitInputIgnoreApplied = null; // null = never explicitly applied yet
 
   let petHidden = false;
@@ -1344,7 +1348,7 @@ function createPetWindowRuntime(options = {}) {
       keepOutOfTaskbar(win);
     }
     const hitWin = getHitWindow();
-    if (isLiveWindow(hitWin)) {
+    if (isLiveWindow(hitWin) && !isExternalInputOwnerActive()) {
       uncloakIfAbnormal(hitWin);
       hitWin.showInactive();
       keepOutOfTaskbar(hitWin);
@@ -1406,6 +1410,9 @@ function createPetWindowRuntime(options = {}) {
     const target = !!hidden;
     const win = getRenderWindow();
     if (!isLiveWindow(win)) return { applied: false, deferred: false, changed: false };
+    if (target && isMappedRenderVisibilityLocked()) {
+      return { applied: false, deferred: false, changed: false, blocked: true };
+    }
     // Preserve the user's explicit Show intent even if a mini transition makes
     // the visibility write wait for a later fullscreen poll. In the common
     // auto-hidden case the manual layer is already visible, so the retry only
@@ -1448,6 +1455,9 @@ function createPetWindowRuntime(options = {}) {
     const target = !!hidden;
     const win = getRenderWindow();
     if (!isLiveWindow(win)) return { applied: false, deferred: false, changed: false };
+    if (target && isMappedRenderVisibilityLocked()) {
+      return { applied: false, deferred: false, changed: false, blocked: true };
+    }
     if (getMiniTransitioning()) return { applied: false, deferred: true, changed: false };
     if (target === fullscreenAutoHidden) return { applied: true, deferred: false, changed: false };
     const prevEffective = isPetEffectivelyHidden();
@@ -1855,7 +1865,7 @@ function createPetWindowRuntime(options = {}) {
     const hitWin = hitWinOverride || getHitWindow();
     if (!isLiveWindow(hitWin) || typeof hitWin.setIgnoreMouseEvents !== "function") return;
     const ignore = hitGeometrySuppressed || isPetEffectivelyHidden()
-      || settingsSizePreviewIgnoringHit || imeEditingPetDodge;
+      || settingsSizePreviewIgnoringHit || imeEditingPetDodge || singleWindowInputSuppressed;
     if (ignore === hitInputIgnoreApplied) return;
     hitWin.setIgnoreMouseEvents(ignore);
     hitInputIgnoreApplied = ignore;
@@ -1868,6 +1878,13 @@ function createPetWindowRuntime(options = {}) {
     const next = !!value;
     if (next === imeEditingPetDodge) return;
     imeEditingPetDodge = next;
+    applyHitInputState();
+  }
+
+  function setSingleWindowInputSuppressed(value) {
+    const next = !!value;
+    if (next === singleWindowInputSuppressed) return;
+    singleWindowInputSuppressed = next;
     applyHitInputState();
   }
 
@@ -1895,6 +1912,7 @@ function createPetWindowRuntime(options = {}) {
   // callers elsewhere) so seam clipping happens strictly after outward
   // clipping, not baked in before it.
   function syncHitWin() {
+    if (isExternalInputOwnerActive()) return DEFERRED_HIT_SYNC;
     const hitWin = getHitWindow();
     const win = getRenderWindow();
     if (!isLiveWindow(hitWin) || !isLiveWindow(win)) return DEFERRED_HIT_SYNC;
@@ -2188,6 +2206,7 @@ function createPetWindowRuntime(options = {}) {
       hasShadow: false,
       fullscreenable: false,
       enableLargerThanScreen: true,
+      ...(typeof optionsArg.title === "string" && optionsArg.title ? { title: optionsArg.title } : {}),
       ...(isLinux ? { type: linuxWindowType } : {}),
       ...(isMac ? { type: "panel", roundedCorners: false } : {}),
       webPreferences: {
@@ -2201,6 +2220,12 @@ function createPetWindowRuntime(options = {}) {
 
     if (typeof optionsArg.setRenderWindow === "function") {
       optionsArg.setRenderWindow(renderWin);
+    }
+    if (typeof optionsArg.title === "string" && optionsArg.title) {
+      renderWin.on("page-title-updated", (event) => {
+        if (event && typeof event.preventDefault === "function") event.preventDefault();
+      });
+      if (typeof renderWin.setTitle === "function") renderWin.setTitle(optionsArg.title);
     }
     renderWin.setFocusable(false);
 
@@ -2680,6 +2705,7 @@ function createPetWindowRuntime(options = {}) {
     // Issue #690 Phase 2 items 5-8 (batch 2)
     getPhysicalRenderBounds,
     setImeEditingPetDodge,
+    setSingleWindowInputSuppressed,
     onNativeGeometryEvent,
     onHitNativeGeometryEvent,
     releaseReconcileProtection,

@@ -84,6 +84,8 @@ function registerPetInteractionIpc(options = {}) {
   const isMacPlatform = options.isMacPlatform != null
     ? !!options.isMacPlatform
     : process.platform === "darwin";
+  const isTrustedInputEvent = options.isTrustedInputEvent || (() => true);
+  const niriInput = options.niriInput || null;
   const disposers = [];
 
   function on(channel, listener) {
@@ -91,8 +93,24 @@ function registerPetInteractionIpc(options = {}) {
     disposers.push(() => ipcMain.removeListener(channel, listener));
   }
 
-  on("show-context-menu", showContextMenu);
-  on("drag-move", () => moveWindowForDrag());
+  const isNiriEvent = (event) => !!(
+    niriInput && typeof niriInput.accepts === "function" && niriInput.accepts(event)
+  );
+  const inputAllowed = (event) => {
+    try { return isTrustedInputEvent(event) === true; } catch { return false; }
+  };
+
+  on("show-context-menu", (event) => {
+    if (inputAllowed(event)) showContextMenu(event);
+  });
+  on("drag-move", (event, payload) => {
+    if (!inputAllowed(event)) return;
+    if (isNiriEvent(event)) {
+      if (typeof niriInput.move === "function") niriInput.move(payload);
+      return;
+    }
+    moveWindowForDrag();
+  });
   on("pet-visual-ready", (event) => recoverVisiblePetAfterRendererLoad(event));
   on("pet-visual-settled", (event, payload) => settleVisual(event, payload));
 
@@ -114,8 +132,13 @@ function registerPetInteractionIpc(options = {}) {
     setAccessoryMirror(!!mirrored);
   });
 
-  on("drag-lock", (_event, locked) => {
-    setDragLocked(!!locked);
+  on("drag-lock", (event, payload) => {
+    if (!inputAllowed(event)) return;
+    const niri = isNiriEvent(event);
+    const locked = payload && typeof payload === "object" ? payload.locked === true : !!payload;
+    if (niri && locked && (typeof niriInput.begin !== "function" || !niriInput.begin(payload))) return;
+    if (niri && !locked && typeof niriInput.end === "function") void niriInput.end();
+    setDragLocked(locked);
     if (locked) {
       setMouseOverPet(true);
       cancelRoam();
@@ -128,19 +151,30 @@ function registerPetInteractionIpc(options = {}) {
     }
   });
 
-  on("start-drag-reaction", (_event, direction) => {
+  on("start-drag-reaction", (event, direction) => {
+    if (!inputAllowed(event)) return;
     const normalized = direction === "left" || direction === "right" ? direction : null;
     if (requestDragReaction) requestDragReaction(normalized);
     else sendToRenderer("start-drag-reaction", normalized);
   });
-  on("end-drag-reaction", () => sendToRenderer("end-drag-reaction"));
-  on("play-click-reaction", (_event, svg, duration) => {
+  on("end-drag-reaction", (event) => {
+    if (inputAllowed(event)) sendToRenderer("end-drag-reaction");
+  });
+  on("play-click-reaction", (event, svg, duration) => {
+    if (!inputAllowed(event)) return;
     if (requestClickReaction) requestClickReaction(svg, duration);
     else sendToRenderer("play-click-reaction", svg, duration);
   });
 
-  on("drag-end", () => {
+  on("drag-end", (event) => {
+    if (!inputAllowed(event)) return;
     try {
+      if (isNiriEvent(event)) {
+        reassertWinTopmost();
+        syncDisplayedVisualGeometry();
+        repositionFloatingBubbles();
+        return;
+      }
       if (!isMiniMode() && !isMiniTransitioning()) {
         if (!getDisableMiniMode()) checkMiniModeSnap();
         if (isMiniMode() || isMiniTransitioning()) return;
@@ -170,12 +204,19 @@ function registerPetInteractionIpc(options = {}) {
     }
   });
 
-  on("exit-mini-mode", () => {
+  on("exit-mini-mode", (event) => {
+    if (!inputAllowed(event)) return;
     if (isMiniMode()) exitMiniMode();
   });
 
-  on("pet-interaction:reveal-session-hud", () => {
+  on("pet-interaction:reveal-session-hud", (event) => {
+    if (!inputAllowed(event)) return;
     revealSessionHud();
+  });
+
+  on("pet-interaction:show-dashboard", (event) => {
+    if (!inputAllowed(event)) return;
+    showDashboard();
   });
 
   // OS file drop from the hit window (#459, Windows/Linux only): first path
@@ -187,6 +228,7 @@ function registerPetInteractionIpc(options = {}) {
   // second layer so a stray IPC can't open terminals there either.
   on("pet-drop-paths", async (event, paths) => {
     try {
+      if (!inputAllowed(event)) return;
       if (isMacPlatform) {
         dropLog("drop ignored: OS file drop is disabled on macOS");
         return;
@@ -218,7 +260,8 @@ function registerPetInteractionIpc(options = {}) {
     }
   });
 
-  on("focus-terminal", () => {
+  on("focus-terminal", (event) => {
+    if (!inputAllowed(event)) return;
     const focusableIds = getFocusableLocalHudSessionIds();
     focusLog(`focus request source=pet-body sid=- focusableCount=${focusableIds.length}`);
     if (focusableIds.length > 1) {

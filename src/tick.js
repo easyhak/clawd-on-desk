@@ -165,7 +165,9 @@ function finishIdleVisualPlayback(attempt) {
 function startMainTick() {
   if (mainTickActive) return;
   // Render window: permanently click-through (set once, never toggle)
-  ctx.win.setIgnoreMouseEvents(true);
+  if (!(typeof ctx.ownsRenderInput === "function" && ctx.ownsRenderInput())) {
+    ctx.win.setIgnoreMouseEvents(true);
+  }
   ctx.mouseOverPet = false;
 
   mainTickActive = true;

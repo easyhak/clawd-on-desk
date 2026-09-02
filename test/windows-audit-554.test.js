@@ -31,6 +31,11 @@ test("second-instance relaunch exits hidden state through the pet visibility sta
     handler.indexOf("petWindowRuntime.setPetHidden(false)") < handler.indexOf("win.showInactive()"),
     "hidden-state recovery should run before the visible-window fast path"
   );
+  assert.match(
+    handler,
+    /hitWin && !hitWin\.isDestroyed\(\)[\s\S]*?!\(niriSingleWindowRuntime && niriSingleWindowRuntime\.protectsMappedRender\(\)\)/,
+    "second-instance must not remap the hidden hit surface while niri owns the mapped render"
+  );
 });
 
 test("hitWin renderer crash clears transient interaction state before reloading", () => {
@@ -50,4 +55,19 @@ test("hitWin renderer crash clears transient interaction state before reloading"
   assert.ok(handler.indexOf("petWindowRuntime.clearDragSnapshot();") < handler.indexOf(reload));
   assert.ok(handler.indexOf("idlePaused = false;") < handler.indexOf(reload));
   assert.ok(handler.indexOf("mouseOverPet = false;") < handler.indexOf(reload));
+});
+
+test("active niri fatal errors are wired to persistent tray status and a user notification", () => {
+  const source = readMain();
+  const start = source.indexOf("function reportNiriSingleWindowFatal(error, phase)");
+  const end = source.indexOf("function isTrustedRenderInputEvent", start);
+  assert.ok(start >= 0 && end > start, "niri fatal reporter should be present");
+
+  const reporter = source.slice(start, end);
+  assert.match(reporter, /niriSingleWindowFailure = \{ phase: safePhase \};/);
+  assert.match(reporter, /rebuildAllMenus\(\)/);
+  assert.match(reporter, /new Notification\(\{/);
+  assert.match(reporter, /Restart without CLAWD_WINDOW_PLACEMENT=niri-ipc-single/);
+  assert.match(source, /onFatal:\s*reportNiriSingleWindowFatal/);
+  assert.match(source, /getNiriSingleWindowFailure:\s*\(\)\s*=>\s*niriSingleWindowFailure/);
 });

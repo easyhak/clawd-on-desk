@@ -222,6 +222,25 @@ describe("pet color menu placement", () => {
   });
 });
 
+describe("niri experiment failure tray status", () => {
+  it("keeps a fatal input failure visible in the tray without adding an action", () => {
+    const initMenu = loadMenuWithElectron(fakeElectron());
+    let trayTemplate = null;
+    const ctx = buildBaseCtx({
+      tray: { setContextMenu(menuObj) { trayTemplate = menuObj.template; } },
+      getNiriSingleWindowFailure: () => ({ phase: "event-stream" }),
+    });
+
+    initMenu(ctx).buildTrayMenu();
+    const status = trayTemplate.find((item) => item.label === (
+      "niri input disabled (event-stream) — restart required"
+    ));
+    assert.ok(status, "fatal niri input state should remain visible in the tray");
+    assert.strictEqual(status.enabled, false);
+    assert.strictEqual(typeof status.click, "undefined");
+  });
+});
+
 describe("macOS visibility toggles live in the tray, not the right-click menu", () => {
   it("drops Show in Dock / Show in Menu Bar from the context menu but keeps them in the tray", (t) => {
     if (process.platform !== "darwin") {

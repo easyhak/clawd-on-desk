@@ -118,6 +118,11 @@ const {
 } = require("./session-automation-dialog-parent");
 const { createSessionFolderOpener } = require("./session-open-folder");
 const { isTrustedMainFrameEvent, registerPetInteractionIpc } = require("./pet-interaction-ipc");
+const {
+  NiriSingleWindowRuntime,
+  createWindowTitle: createNiriWindowTitle,
+  evaluateNiriSingleWindowGate,
+} = require("./niri-single-window-runtime");
 const { createSystemWakeRecovery } = require("./system-wake-recovery");
 const { formatLocalTimestamp } = require("./log-timestamp");
 const { launchClaudeSession, openTerminalAt } = require("./launch-claude");
@@ -1088,6 +1093,15 @@ const petWindowRuntime = createPetWindowRuntime({
   // like isMiniAnimating above — _roam is constructed after petWindowRuntime,
   // but this closure isn't invoked until well after module load finishes).
   isRoamAnimating: () => _roam.isRoamAnimating(),
+  isExternalInputOwnerActive: () => !!(
+    niriSingleWindowRuntime && niriSingleWindowRuntime.isActive()
+  ),
+  isMappedRenderVisibilityLocked: () => !!(
+    niriSingleWindowRuntime && niriSingleWindowRuntime.protectsMappedRender()
+  ),
+  isEdgeVirtualizationDisabled: () => (
+    process.env.CLAWD_DISABLE_EDGE_VIRTUALIZATION === "1" || niriSingleWindowGate.enabled
+  ),
   isNearWorkAreaEdge: (bounds) => isNearWorkAreaEdge(bounds),
   flushRuntimeStateToPrefs: () => flushRuntimeStateToPrefs(),
   handleMiniDisplayChange: () => _mini.handleDisplayChange(),
@@ -1111,6 +1125,78 @@ function getAssetPointerPayload(bounds, point) {
 
 let win;
 let hitWin;  // input window — small opaque rect over hitbox, receives all pointer events
+const niriSingleWindowGate = evaluateNiriSingleWindowGate({
+  platform: process.platform,
+  arch: process.arch,
+  env: process.env,
+  argv: process.argv,
+});
+const niriSingleWindowTitle = niriSingleWindowGate.enabled ? createNiriWindowTitle() : null;
+let niriSingleWindowRuntime = null;
+let niriSingleWindowFailure = null;
+const niriSingleInputIpcDisposers = [];
+
+function reportNiriSingleWindowFatal(error, phase) {
+  if (niriSingleWindowFailure) return;
+  const safePhase = typeof phase === "string" && /^[a-z0-9:-]+$/i.test(phase)
+    ? phase
+    : "runtime";
+  niriSingleWindowFailure = { phase: safePhase };
+  try { rebuildAllMenus(); } catch {}
+  try {
+    if (typeof Notification.isSupported !== "function" || Notification.isSupported()) {
+      new Notification({
+        title: "Clawd niri experiment stopped",
+        body: `Pet input was disabled (${safePhase}). Restart without CLAWD_WINDOW_PLACEMENT=niri-ipc-single.`,
+      }).show();
+    }
+  } catch (notificationError) {
+    console.warn(
+      "Clawd: could not show niri failure notification:",
+      notificationError && notificationError.message ? notificationError.message : notificationError,
+    );
+  }
+}
+
+if (process.env.CLAWD_WINDOW_PLACEMENT === "niri-ipc-single" && !niriSingleWindowGate.enabled) {
+  console.warn(`Clawd: niri single-window experiment disabled: ${niriSingleWindowGate.reason}`);
+}
+
+function isTrustedRenderInputEvent(event) {
+  return !!(
+    win
+    && !win.isDestroyed()
+    && isTrustedMainFrameEvent(event, win.webContents)
+  );
+}
+
+function isTrustedPetInputEvent(event) {
+  if (niriSingleWindowRuntime && niriSingleWindowRuntime.acceptsRenderInput()) {
+    return isTrustedRenderInputEvent(event);
+  }
+  return !!(
+    hitWin
+    && !hitWin.isDestroyed()
+    && isTrustedMainFrameEvent(event, hitWin.webContents)
+  );
+}
+
+function registerNiriSingleInputIpc() {
+  if (!niriSingleWindowRuntime || niriSingleInputIpcDisposers.length > 0) return;
+  const register = (channel, listener) => {
+    ipcMain.on(channel, listener);
+    niriSingleInputIpcDisposers.push(() => ipcMain.removeListener(channel, listener));
+  };
+  register("pet-input-ready", (event, payload) => {
+    if (isTrustedRenderInputEvent(event)) niriSingleWindowRuntime.handleRenderReady(payload);
+  });
+  register("pet-input-bootstrap-ack", (event, payload) => {
+    if (isTrustedRenderInputEvent(event)) niriSingleWindowRuntime.handleBootstrapAck(payload);
+  });
+  register("pet-input-enabled-ack", (event, payload) => {
+    if (isTrustedRenderInputEvent(event)) niriSingleWindowRuntime.handleEnabledAck(payload);
+  });
+}
 
 // Tray icon flash state
 let trayFlashTimer = null;
@@ -1504,6 +1590,7 @@ function sendToRenderer(channel, ...args) {
 }
 function sendToHitWin(channel, ...args) {
   if (hitWin && !hitWin.isDestroyed()) hitWin.webContents.send(channel, ...args);
+  if (niriSingleWindowRuntime) niriSingleWindowRuntime.forwardControllerMessage(channel, ...args);
 }
 function broadcastSettingsWindow(channel, payload) {
   try {
@@ -1529,12 +1616,22 @@ function syncSoundPreloads() {
 }
 
 function setViewportOffsetY(offsetY) { return petWindowRuntime.setViewportOffsetY(offsetY); }
-function getPetWindowBounds() { return petWindowRuntime.getPetWindowBounds(); }
+function getPetWindowBounds() {
+  if (niriSingleWindowRuntime && niriSingleWindowRuntime.isActive()) {
+    return niriSingleWindowRuntime.getBounds();
+  }
+  return petWindowRuntime.getPetWindowBounds();
+}
 // Issue #690 Phase 3: mini's per-frame applyMiniFrameBounds() needs opts
 // (workArea/edgeContext/assertNoYOffset) to actually reach
 // petWindowRuntime.applyPetWindowBounds() — this wrapper used to silently
 // drop a second argument, which would have made assertNoYOffset a no-op.
-function applyPetWindowBounds(bounds, opts) { return petWindowRuntime.applyPetWindowBounds(bounds, opts); }
+function applyPetWindowBounds(bounds, opts) {
+  if (niriSingleWindowRuntime && niriSingleWindowRuntime.isActive()) {
+    return niriSingleWindowRuntime.applyBounds(bounds, opts);
+  }
+  return petWindowRuntime.applyPetWindowBounds(bounds, opts);
+}
 // PR #751 Codex deep review, rework batch A (coordinator-attributed fix):
 // this sibling wrapper had the exact same 2-param bug applyPetWindowBounds
 // above was fixed for — topmost-runtime.js's applyFreshNudge() (#525) calls
@@ -1542,7 +1639,13 @@ function applyPetWindowBounds(bounds, opts) { return petWindowRuntime.applyPetWi
 // compositor-refresh nudge writes natively even when the materialized
 // physical rect already matches current live bounds, but this wrapper
 // silently dropped that third argument, making force:true a no-op.
-function applyPetWindowPosition(x, y, opts) { return petWindowRuntime.applyPetWindowPosition(x, y, opts); }
+function applyPetWindowPosition(x, y, opts) {
+  if (niriSingleWindowRuntime && niriSingleWindowRuntime.isActive()) {
+    const bounds = niriSingleWindowRuntime.getBounds();
+    return bounds ? niriSingleWindowRuntime.applyBounds({ ...bounds, x, y }, opts) : null;
+  }
+  return petWindowRuntime.applyPetWindowPosition(x, y, opts);
+}
 
 function syncHitStateAfterLoad() {
   sendToHitWin("hit-state-sync", {
@@ -1711,7 +1814,12 @@ function flashTaskbar() {
   });
 }
 
-function syncHitWin() { return petWindowRuntime.syncHitWin(); }
+function syncHitWin() {
+  if (niriSingleWindowRuntime && niriSingleWindowRuntime.isActive()) {
+    return niriSingleWindowRuntime.syncInputGeometry("sync-hit");
+  }
+  return petWindowRuntime.syncHitWin();
+}
 
 function getDisplayedVisualTuple() {
   const committed = displayedVisualProjection
@@ -2470,6 +2578,9 @@ const _tickCtx = {
   getHitRectScreen,
   getAssetPointerPayload,
   get roam() { return _roam; },
+  ownsRenderInput: () => !!(
+    niriSingleWindowRuntime && niriSingleWindowRuntime.acceptsRenderInput()
+  ),
 };
 const _tick = require("./tick")(_tickCtx);
 requestFastTick = (maxDelay) => _tick.scheduleSoon(maxDelay);
@@ -4164,6 +4275,7 @@ const _menuCtx = {
   set menuOpen(v) { menuOpen = v; },
   get tray() { return tray; },
   set tray(v) { tray = v; },
+  getNiriSingleWindowFailure: () => niriSingleWindowFailure,
   get contextMenuOwner() { return contextMenuOwner; },
   set contextMenuOwner(v) { contextMenuOwner = v; },
   get contextMenu() { return contextMenu; },
@@ -4310,7 +4422,7 @@ const SETTINGS_MIRROR_SETTERS = {
   soundMuted: (v) => { soundMuted = v; }, soundVolume: (v) => { soundVolume = v; }, lowPowerIdleMode: (v) => { lowPowerIdleMode = v; },
   keepAwakeWhileWorking: (v) => { keepAwakeWhileWorking = v; },
   petTint: (v) => { petTint = v; },
-  allowEdgePinning: (v) => { allowEdgePinningCached = v; }, disableMiniMode: (v) => { disableMiniModeCached = v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; resetKeepSizeFrozen(); },
+  allowEdgePinning: (v) => { allowEdgePinningCached = niriSingleWindowGate.enabled ? false : v; }, disableMiniMode: (v) => { disableMiniModeCached = niriSingleWindowGate.enabled ? true : v; }, keepSizeAcrossDisplays: (v) => { keepSizeAcrossDisplaysCached = v; resetKeepSizeFrozen(); },
   fullscreenOverlay: (v) => { fullscreenOverlayCached = v; },
   fullscreenAutoHide: (v) => {
     fullscreenAutoHideCached = v;
@@ -4319,7 +4431,7 @@ const SETTINGS_MIRROR_SETTERS = {
       petWindowRuntime.setFullscreenAutoHidden(false);
     }
   },
-  freeRoam: (v) => { _roam.setEnabled(v); },
+  freeRoam: (v) => { _roam.setEnabled(!niriSingleWindowGate.enabled && v); },
   textScale: (v) => { textScale = v; textScalePreview = null; },
   textScaleByDisplay: (v) => { textScaleByDisplay = v; textScalePreview = null; },
 };
@@ -4761,6 +4873,13 @@ function createWindow() {
   // (lang/showTray/etc.) were already initialized at module-load time, so
   // here we just need the position/mini fields plus the legacy size migration.
   let prefs = _settingsController.getSnapshot();
+  if (niriSingleWindowGate.enabled) {
+    // Stage 0 deliberately excludes mini, roam, and edge virtualization. The
+    // overrides are runtime-only; the user's stored preferences are untouched.
+    disableMiniModeCached = true;
+    allowEdgePinningCached = false;
+    _roam.setEnabled(false);
+  }
   // Legacy S/M/L → P:N migration. Only kicks in for prefs files that haven't
   // been touched since v0; new files always store the proportional form.
   if (SIZES[prefs.size]) {
@@ -4798,12 +4917,67 @@ function createWindow() {
     }
   }
 
+  const startupPlacementPrefs = niriSingleWindowGate.enabled && prefs.miniMode
+    ? {
+      ...prefs,
+      miniMode: false,
+      positionSaved: Number.isFinite(prefs.preMiniX) && Number.isFinite(prefs.preMiniY),
+      x: Number.isFinite(prefs.preMiniX) ? prefs.preMiniX : prefs.x,
+      y: Number.isFinite(prefs.preMiniY) ? prefs.preMiniY : prefs.y,
+    }
+    : prefs;
+
   const {
     initialVirtualBounds,
     initialWindowBounds,
-  } = petWindowRuntime.resolveStartupPlacement(prefs, size, {
+  } = petWindowRuntime.resolveStartupPlacement(startupPlacementPrefs, size, {
     restoreMiniFromPrefs: (prefsSnapshot, pixelSize) => _mini.restoreFromPrefs(prefsSnapshot, pixelSize),
   });
+
+  if (niriSingleWindowGate.enabled && !niriSingleWindowRuntime) {
+    niriSingleWindowRuntime = new NiriSingleWindowRuntime({
+      socketPath: niriSingleWindowGate.socketPath,
+      title: niriSingleWindowTitle,
+      getRenderWindow: () => win,
+      getHitWindow: () => hitWin,
+      getHitRectScreen: (bounds) => petWindowRuntime.getHitRectScreen(bounds),
+      getThemeConfig: () => themeRuntime.getHitRendererConfig(),
+      getInputState: () => ({
+        currentState: _state.getCurrentState(),
+        miniMode: false,
+        dndEnabled: doNotDisturb,
+      }),
+      sendToRender: (channel, payload) => {
+        if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+      },
+      setHitSuppressed: (value) => petWindowRuntime.setSingleWindowInputSuppressed(value),
+      hideHit: () => { if (hitWin && !hitWin.isDestroyed()) hitWin.hide(); },
+      showHit: () => {
+        if (!hitWin || hitWin.isDestroyed()) return;
+        hitWin.showInactive();
+        keepOutOfTaskbar(hitWin);
+      },
+      onDragSettled: () => {
+        flushRuntimeStateToPrefs();
+        repositionFloatingBubbles();
+      },
+      onDragCancelled: () => {
+        petWindowRuntime.setDragLocked(false);
+        clearDragSnapshot();
+      },
+      canHandoffInput: () => !petWindowRuntime.isDragLocked(),
+      onError: (error, phase) => {
+        console.warn(`Clawd: niri single-window ${phase}:`, error && error.message ? error.message : error);
+      },
+      onFatal: reportNiriSingleWindowFatal,
+      onDiagnostic: (entry) => {
+        if (process.env.CLAWD_WINDOW_DEBUG === "1") {
+          console.log(`Clawd: niri single-window ${JSON.stringify(entry)}`);
+        }
+      },
+    });
+    registerNiriSingleInputIpc();
+  }
 
   const initialAccessoryDelivery = prepareCurrentAccessorySlotsDelivery();
   petWindowRuntime.createRenderWindow({
@@ -4814,6 +4988,7 @@ function createWindow() {
     preloadPath: path.join(__dirname, "preload.js"),
     loadFilePath: path.join(__dirname, "index.html"),
     themeConfig: buildRendererThemeConfig(initialAccessoryDelivery.snapshot),
+    title: niriSingleWindowTitle || undefined,
     setRenderWindow: (createdWindow) => { win = createdWindow; },
     isQuitting: () => isQuitting,
     applyDockVisibility,
@@ -4864,6 +5039,15 @@ function createWindow() {
 
   registerPetInteractionIpc({
     ipcMain,
+    isTrustedInputEvent: (event) => isTrustedPetInputEvent(event),
+    niriInput: niriSingleWindowRuntime ? {
+      accepts: (event) => (
+        niriSingleWindowRuntime.acceptsRenderInput() && isTrustedRenderInputEvent(event)
+      ),
+      begin: (payload) => niriSingleWindowRuntime.beginDrag(payload),
+      move: (payload) => niriSingleWindowRuntime.moveDrag(payload),
+      end: () => niriSingleWindowRuntime.endDrag(),
+    } : null,
     showContextMenu: (event) => showPetContextMenu(event),
     moveWindowForDrag: () => moveWindowForDrag(),
     setIdlePaused: (value) => { idlePaused = !!value; },
@@ -4939,6 +5123,15 @@ function createWindow() {
 
   initFocusHelper();
   startMainTick();
+  if (niriSingleWindowRuntime) {
+    void niriSingleWindowRuntime.start().then((active) => {
+      if (active) {
+        console.log("Clawd: niri single-window Stage 0 active");
+        return;
+      }
+      if (win && !win.isDestroyed() && typeof win.setTitle === "function") win.setTitle("Clawd");
+    });
+  }
   // Silently connect any remote SSH profile flagged "connect on launch" once
   // the hook server is ACTUALLY listening and its real port is known.
   // runtime.connect() reads getHookServerPort() synchronously to build the SSH
@@ -4982,6 +5175,7 @@ function createWindow() {
   // If hooks arrived during startup, respect them instead of forcing idle
   // Also handles crash recovery (render-process-gone → reload)
   win.webContents.on("did-start-loading", () => {
+    if (niriSingleWindowRuntime) niriSingleWindowRuntime.handleRenderLoading();
     setLowPowerIdlePaused(false);
     // A fresh document draws upright: no .mini-left class, no inline scale on
     // the direction stage. Keeping the old facing here would leave the hit
@@ -5004,6 +5198,7 @@ function createWindow() {
     idlePaused = false;
     mouseOverPet = false;
     resetDisplayedVisualProjection("renderer-process-gone", { preserveCommitted: true });
+    if (niriSingleWindowRuntime) niriSingleWindowRuntime.handleRenderLoading();
     petWindowRuntime.reloadWindowWebContents(win, { crashKey: "renderWin", details });
   });
 
@@ -5214,11 +5409,11 @@ const _roam = require("./roam")(_roamCtx);
 _roamCtx.roamFence.refresh();
 
 // Free roam: initialize from prefs and react to toggle changes
-_roam.setEnabled(_settingsController.get("freeRoam") === true);
+_roam.setEnabled(!niriSingleWindowGate.enabled && _settingsController.get("freeRoam") === true);
 _roam.setConstrainAxis(_settingsController.get("roamConstrainAxis") === true);
 try {
   _settingsController.subscribeKey("freeRoam", (value) => {
-    _roam.setEnabled(value === true);
+    _roam.setEnabled(!niriSingleWindowGate.enabled && value === true);
   });
   _settingsController.subscribeKey("roamConstrainAxis", (value) => {
     _roam.setConstrainAxis(value === true);
@@ -5320,7 +5515,8 @@ if (!gotTheLock) {
         win.showInactive();
         keepOutOfTaskbar(win);
       }
-      if (hitWin && !hitWin.isDestroyed()) {
+      if (hitWin && !hitWin.isDestroyed()
+        && !(niriSingleWindowRuntime && niriSingleWindowRuntime.protectsMappedRender())) {
         hitWin.showInactive();
         keepOutOfTaskbar(hitWin);
       }
@@ -5634,6 +5830,10 @@ if (!gotTheLock) {
     agentRuntime.cleanup();
     topmostRuntime.cleanup();
     themeRuntime.cleanup();
+    if (niriSingleWindowRuntime) niriSingleWindowRuntime.dispose();
+    while (niriSingleInputIpcDisposers.length) {
+      try { niriSingleInputIpcDisposers.pop()(); } catch {}
+    }
     _focus.cleanup();
     if (animationOverridesMain) animationOverridesMain.cleanup();
     try { _remoteSshIpc.dispose(); } catch {}

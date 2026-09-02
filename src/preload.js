@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
 // Parse theme config from additionalArguments (synchronous, available on first load)
 const themeArg = process.argv.find(a => a.startsWith("--theme-config="));
@@ -66,4 +66,39 @@ contextBridge.exposeInMainWorld("electronAPI", {
   setLowPowerIdlePaused: (paused) => ipcRenderer.send("low-power-idle-paused", !!paused),
   reportSystemWakeStatus: (payload) => ipcRenderer.send("system-wake-status", payload),
   reportAccessoryMirror: (mirrored) => ipcRenderer.send("accessory-mirror", !!mirrored),
+});
+
+// Default-off Linux/niri single-window input bridge. The render page receives
+// only the same narrow interaction contract as preload-hit.js plus the two-step
+// ownership handshake; no Electron object crosses the context bridge.
+contextBridge.exposeInMainWorld("petInputAPI", {
+  notifyReady: (payload) => ipcRenderer.send("pet-input-ready", payload),
+  onBootstrap: (cb) => ipcRenderer.on("pet-input-bootstrap", (_, payload) => cb(payload)),
+  ackBootstrap: (payload) => ipcRenderer.send("pet-input-bootstrap-ack", payload),
+  onEnabled: (cb) => ipcRenderer.on("pet-input-enabled", (_, payload) => cb(payload)),
+  ackEnabled: (payload) => ipcRenderer.send("pet-input-enabled-ack", payload),
+  dragLock: (locked, details) => ipcRenderer.send(
+    "drag-lock",
+    locked ? { locked: true, ...(details || {}) } : { locked: false },
+  ),
+  dragMove: (payload) => ipcRenderer.send("drag-move", payload),
+  dragEnd: () => ipcRenderer.send("drag-end"),
+  showContextMenu: () => ipcRenderer.send("show-context-menu"),
+  getPathForFile: (file) => {
+    try { return webUtils.getPathForFile(file) || ""; } catch (_) { return ""; }
+  },
+  dropPaths: (paths) => ipcRenderer.send("pet-drop-paths", paths),
+  onDropAccepted: (cb) => ipcRenderer.on("pet-drop-accepted", () => cb()),
+  exitMiniMode: () => ipcRenderer.send("exit-mini-mode"),
+  showDashboard: () => ipcRenderer.send("pet-interaction:show-dashboard"),
+  revealSessionHud: () => ipcRenderer.send("pet-interaction:reveal-session-hud"),
+  startDragReaction: (direction) => ipcRenderer.send("start-drag-reaction", direction),
+  endDragReaction: () => ipcRenderer.send("end-drag-reaction"),
+  playClickReaction: (svg, duration) => ipcRenderer.send("play-click-reaction", svg, duration),
+  // Keep the input controller's narrow hit config off the renderer's visual
+  // theme channel. Both APIs live in this preload, so sharing "theme-config"
+  // would deliver each incompatible payload to both consumers.
+  onThemeConfig: (cb) => ipcRenderer.on("pet-input-theme-config", (_, config) => cb(config)),
+  onStateSync: (cb) => ipcRenderer.on("hit-state-sync", (_, state) => cb(state)),
+  onCancelReaction: (cb) => ipcRenderer.on("hit-cancel-reaction", () => cb()),
 });

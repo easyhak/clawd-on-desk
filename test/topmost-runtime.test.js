@@ -419,7 +419,7 @@ describe("topmost runtime Windows recovery", () => {
   it("main.js's actual applyPetWindowPosition wrapper still has the 3-arg (x, y, opts) shape the assembly test above mirrors", () => {
     const mainSource = fs.readFileSync(path.join(__dirname, "..", "src", "main.js"), "utf8");
     assert.ok(
-      mainSource.includes("function applyPetWindowPosition(x, y, opts) { return petWindowRuntime.applyPetWindowPosition(x, y, opts); }"),
+      /function applyPetWindowPosition\(x, y, opts\)\s*\{[\s\S]*?petWindowRuntime\.applyPetWindowPosition\(x, y, opts\);\s*\}/.test(mainSource),
       "src/main.js's applyPetWindowPosition wrapper must keep forwarding all 3 arguments — a silent regression back to (x, y) would make force:true a no-op again, invisibly to every spy-based test in this file"
     );
   });

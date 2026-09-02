@@ -82,6 +82,24 @@ function makeCtx(theme, statesSeen) {
   };
 }
 
+describe("tick render input ownership", () => {
+  it("does not overwrite the native Input Shape while the render window owns input", () => {
+    const loader = loadTickWithScreen(() => ({ x: 0, y: 0 }));
+    const calls = [];
+    const ctx = makeCtx(cloneTheme(_defaultTheme), []);
+    ctx.win.setIgnoreMouseEvents = (value) => calls.push(value);
+    ctx.ownsRenderInput = () => true;
+    const tickApi = loader.initTick(ctx);
+    try {
+      tickApi.startMainTick();
+      assert.deepStrictEqual(calls, []);
+    } finally {
+      tickApi.cleanup();
+      loader.restore();
+    }
+  });
+});
+
 describe("tick sleepSequence mode", () => {
   let cursor;
   let loader;
