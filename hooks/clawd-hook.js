@@ -45,6 +45,7 @@ const TOOL_MATCH_OBJECT_KEYS_MAX = 32;
 const TOOL_MATCH_DEPTH_MAX = 6;
 const ASSISTANT_OUTPUT_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001F\u007F-\u009F]+/g;
 const CURSOR_VERSION_MAX = 128;
+const MODEL_ID_MAX = 128;
 
 function resolveReportingAgentId(payload) {
   const cursorVersion = payload && typeof payload.cursor_version === "string"
@@ -282,6 +283,15 @@ function normalizeToolUseId(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed || null;
+}
+
+// Rendered verbatim on the session card, so cap the length and drop control
+// characters that could break the row.
+function normalizeModelId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > MODEL_ID_MAX) return null;
+  return /[\0\r\n]/.test(trimmed) ? null : trimmed;
 }
 
 function normalizeToolMatchValue(value, depth = 0) {
@@ -617,6 +627,10 @@ function buildStateBody(event, payload, resolve) {
     }
   }
   if (cwd) body.cwd = cwd;
+  // Only SessionStart carries a model, and even there it is optional (`clear`
+  // omits it). state.js merges it stickily, so one report is enough.
+  const model = normalizeModelId(payload.model);
+  if (model) body.model = model;
   const toolName = typeof payload.tool_name === "string" && payload.tool_name ? payload.tool_name : null;
   const toolUseId = normalizeToolUseId(payload.tool_use_id ?? payload.toolUseId ?? payload.toolUseID);
   const toolInputFingerprint = buildToolInputFingerprint(

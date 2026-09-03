@@ -1692,6 +1692,12 @@ describe("updateSession()", () => {
     assert.strictEqual(api.sessions.get("new1").state, "working");
   });
 
+  it("keeps a known model when a later event reports none (sticky merge)", () => {
+    update(api, { id: "sticky1", state: "working", model: "claude-opus-5" });
+    update(api, { id: "sticky1", state: "working", event: "PostToolUse" });
+    assert.strictEqual(api.sessions.get("sticky1").model, "claude-opus-5");
+  });
+
   it("stores only a normalized route-owned session automation assessment", () => {
     update(api, {
       id: "automation-identity",

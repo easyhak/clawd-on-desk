@@ -748,6 +748,15 @@ function appendEvent(main, session, now) {
   ));
 }
 
+// Own row, not a chip in `.meta`: that row is a single clipped line, so at the
+// default 480px width an appended chip is cut off before it can be read.
+function appendModel(main, session) {
+  if (!session.model) return;
+  const row = createText("div", "model-row", `${t("dashboardModel")}: ${session.model}`);
+  row.title = session.model;
+  main.appendChild(row);
+}
+
 function appendContextUsage(main, session) {
   const text = contextUsageText(session);
   if (!text) return;
@@ -855,6 +864,7 @@ function createCard(session, now) {
   main.appendChild(createTitle(session));
   appendMeta(main, session, now);
   appendPath(main, session);
+  appendModel(main, session);
   appendEvent(main, session, now);
   appendContextUsage(main, session);
   appendSessionAutomation(main, session);

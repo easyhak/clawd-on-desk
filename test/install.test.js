@@ -724,6 +724,21 @@ describe("Hook installer version compatibility", () => {
     assert.strictEqual(result.version, "2.1.78");
   });
 
+  it("never claims either model-switch hook", () => {
+    // PreModelSwitch blocks the switch on a missed answer; PostModelSwitch
+    // displaces the Done badge and the last-event row. Both stay unclaimed.
+    const settingsPath = makeTempSettings({});
+    registerHooks({
+      silent: true,
+      settingsPath,
+      claudeVersionInfo: { version: "2.1.251", source: "test", status: "known" },
+    });
+
+    const settings = readSettings(settingsPath);
+    assert.ok(!Object.prototype.hasOwnProperty.call(settings.hooks, "PreModelSwitch"));
+    assert.ok(!Object.prototype.hasOwnProperty.call(settings.hooks, "PostModelSwitch"));
+  });
+
   it("keeps PreCompact/PostCompact but skips StopFailure below 2.1.78", () => {
     const settingsPath = makeTempSettings({});
     registerHooks({
