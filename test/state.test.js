@@ -3698,6 +3698,43 @@ describe("updateSession()", () => {
     assert.strictEqual(session.contextUsageOrigin, null);
   });
 
+  // The statusline is the only producer that reports the model after
+  // SessionStart, and a hook event carrying one would displace the Stop tail
+  // deriveSessionBadge reads.
+  it("updateSessionMetadata relabels the model without disturbing badge or lifecycle", () => {
+    update(api, { id: "s1", state: "working", model: "claude-sonnet-5" });
+    update(api, { id: "s1", state: "attention", event: "Stop" });
+    const session = api.sessions.get("s1");
+    assert.strictEqual(api.deriveSessionBadge(session), "done");
+    session.updatedAt = 12345;
+    session.metadataUpdatedAt = 777;
+    const recentEventsBefore = JSON.stringify(session.recentEvents);
+
+    const applied = api.updateSessionMetadata("s1", { model: "claude-opus-5" });
+
+    assert.strictEqual(applied, true);
+    assert.strictEqual(session.model, "claude-opus-5");
+    assert.strictEqual(api.deriveSessionBadge(session), "done");
+    assert.strictEqual(session.updatedAt, 12345);
+    assert.strictEqual(session.metadataUpdatedAt, 777);
+    assert.strictEqual(JSON.stringify(session.recentEvents), recentEventsBefore);
+  });
+
+  it("updateSessionMetadata treats an unchanged model as a no-op", () => {
+    update(api, { id: "s1", state: "working", model: "claude-opus-5" });
+    const session = api.sessions.get("s1");
+    session.metadataUpdatedAt = 777;
+
+    assert.strictEqual(api.updateSessionMetadata("s1", { model: "claude-opus-5" }), true);
+    assert.strictEqual(api.updateSessionMetadata("s1", { model: "  claude-opus-5  " }), true);
+    assert.strictEqual(session.model, "claude-opus-5");
+    assert.strictEqual(session.metadataUpdatedAt, 777);
+  });
+
+  it("a model-only metadata payload never creates a ghost session", () => {
+    assert.strictEqual(api.updateSessionMetadata("ghost", { model: "claude-opus-5" }), false);
+  });
+
   it("updateSessionMetadata treats a same/normalized-equivalent title as a no-op", () => {
     update(api, { id: "s1", state: "working" });
     api.updateSessionMetadata("s1", { sessionTitle: "Stable Title" });

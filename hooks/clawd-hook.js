@@ -10,6 +10,7 @@ const { fitStateBodyToByteBudget } = require("./state-payload-size");
 const { extractClaudeContextUsageFromEntries } = require("./context-usage");
 const { createPidResolver, readStdinJsonDetailed, getPlatformConfig, applyOrcaPaneKey } = require("./shared-process");
 const { updateRecoveryLeaseFromStateBody } = require("./session-recovery-lease");
+const { normalizeModelId } = require("./claude-rate-limits");
 // #634: the pid cache + lifecycle orchestration is owned by the shared resolver
 // now (hooks/shared-process.js); this adapter no longer touches pid-cache,
 // processAlive, or isWin directly.
@@ -45,7 +46,6 @@ const TOOL_MATCH_OBJECT_KEYS_MAX = 32;
 const TOOL_MATCH_DEPTH_MAX = 6;
 const ASSISTANT_OUTPUT_CONTROL_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001F\u007F-\u009F]+/g;
 const CURSOR_VERSION_MAX = 128;
-const MODEL_ID_MAX = 128;
 
 function resolveReportingAgentId(payload) {
   const cursorVersion = payload && typeof payload.cursor_version === "string"
@@ -283,15 +283,6 @@ function normalizeToolUseId(value) {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   return trimmed || null;
-}
-
-// Rendered verbatim on the session card, so cap the length and drop control
-// characters that could break the row.
-function normalizeModelId(value) {
-  if (typeof value !== "string") return null;
-  const trimmed = value.trim();
-  if (!trimmed || trimmed.length > MODEL_ID_MAX) return null;
-  return /[\0\r\n]/.test(trimmed) ? null : trimmed;
 }
 
 function normalizeToolMatchValue(value, depth = 0) {
